@@ -1,4 +1,4 @@
-class UnsafeCalculator {
+class Calculator {
   constructor() {
     this.display = document.getElementById('calc-display');
     this.history = [];

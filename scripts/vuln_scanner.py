@@ -51,6 +51,9 @@ RULES = {
                              "Possible SQL injection via string formatting"),
         ("SEC005", "MEDIUM", r'\bhashlib\.md5\b|\bhashlib\.sha1\b',
                              "Weak hashing algorithm (MD5/SHA1)"),
+        ("SEC030", "HIGH", r'\byaml\.load\s*\(', "yaml.load() without SafeLoader — RCE risk"),
+
+        ("SEC034", "MEDIUM", r'\bmarshal\.loads\s*\(', "marshal deserialization — arbitrary code risk"),
     ],
 
     "javascript": [

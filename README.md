@@ -1,4 +1,4 @@
-# SecPipe — Multi-Language Security Scanner & CI Pipeline
+# GitBetter — Multi-Language Security Scanner & CI Pipeline
 
 A static analysis security scanner that detects vulnerabilities across **6 programming languages**, integrated into a GitHub Actions CI pipeline alongside [Bandit](https://github.com/PyCQA/bandit) and [Safety](https://github.com/pyupio/safety).
 

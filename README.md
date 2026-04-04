@@ -15,7 +15,7 @@ A static analysis security scanner that detects vulnerabilities across **6 progr
 
 ## Detection Rules
 
-**159 rules** across 6 languages, organized into the following categories:
+**178 rules** across 6 languages, organized into the following categories:
 
 ### Secrets & Credentials
 | Rule | Severity | Description |
@@ -104,6 +104,15 @@ A static analysis security scanner that detects vulnerabilities across **6 progr
 | SEC049 | MEDIUM | JWT `kid`/`jku`/`x5u` header extraction — injection surface |
 | SEC050 | HIGH | `ignoreExpiration: true` — expired tokens accepted |
 
+### LDAP Injection
+| Rule | Severity | Description |
+|------|----------|-------------|
+| SEC051 | HIGH | LDAP search/query with user-controlled input (`request.args`, `$_GET`, `req.params`, `request.getParameter`, `r.FormValue`, `ldapsearch $VAR`) |
+| SEC051B | HIGH | PHP `ldap_list`/`ldap_read` with superglobal input |
+| SEC052 | HIGH | LDAP bind/auth with user input — authentication bypass risk |
+| SEC053 | HIGH | LDAP filter built via string concatenation, f-strings, `Sprintf`, or template literals with attribute names (`uid`, `cn`, `sn`, `mail`, `sAMAccountName`, etc.) |
+| SEC053B | HIGH | LDAP filter built via PHP string concatenation (`. $var`) |
+
 ### Unicode & IDN
 | Rule | Severity | Description |
 |------|----------|-------------|
@@ -129,7 +138,7 @@ Source Code
     ▼
 ┌──────────────────────┐
 │   vuln_scanner.py    │  Regex rules (all 6 languages) + Python AST analysis
-│   159 rules          │
+│   178 rules          │
 └──────────┬─────────��─┘
            │
            ▼
@@ -204,7 +213,7 @@ mv github_workflow .github
 ```
 .
 ├── scripts/
-│   ├── vuln_scanner.py        # Multi-language vulnerability scanner (159 rules)
+│   ├── vuln_scanner.py        # Multi-language vulnerability scanner (178 rules)
 │   └── evaluate_results.py    # Aggregates scan results, gates CI
 ├── github_workflow/
 │   └── workflows/

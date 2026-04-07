@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Multi-language vulnerability scanner.
-Supports: Python, JavaScript/TypeScript, PHP, Java, Go, Bash
+Supports: Python, JavaScript/TypeScript, PHP, Java, Go, Bash, C
 """
 import ast
 import re
@@ -33,6 +33,8 @@ EXTENSION_MAP = {
     ".go":   "go",
     ".sh":   "bash",
     ".bash": "bash",
+    ".c":    "c",
+    ".h":    "c",
 }
 
 
@@ -453,6 +455,16 @@ RULES = {
         ("SEC052", "HIGH",   r'\bldap(whoami|passwd|modify|add|delete)\b.*\$\{?[A-Za-z_]+\}?',
                              "LDAP command with unvalidated variable — injection risk"),
         ("SEC009", "MEDIUM", r'http://',                     "Insecure HTTP protocol"),
+    ],
+    "c": [
+        ("SEC060", "MEDIUM", r'\bmmap\s*\([^;]*\bPROT_EXEC\b',
+                             "Executable memory mapping (PROT_EXEC) - review for shellcode/JIT safety"),
+        ("SEC060B","MEDIUM", r'\bmprotect\s*\([^;]*\bPROT_EXEC\b',
+                             "Memory protection changed to executable (PROT_EXEC) - review for shellcode/JIT safety"),
+        ("SEC060C","MEDIUM", r'\bVirtualAlloc\s*\([^;]*\bPAGE_EXECUTE(?:_READ|_READWRITE|_WRITECOPY)?\b',
+                             "Executable memory allocation (PAGE_EXECUTE*) - review for shellcode/JIT safety"),
+        ("SEC060D","MEDIUM", r'\bVirtualProtect\s*\([^;]*\bPAGE_EXECUTE(?:_READ|_READWRITE|_WRITECOPY)?\b',
+                             "Memory protection changed to executable (PAGE_EXECUTE*) - review for shellcode/JIT safety"),
     ],
 }
 

@@ -33,9 +33,20 @@ EXTENSION_MAP = {
     ".go":   "go",
     ".sh":   "bash",
     ".bash": "bash",
+    ".mk":   "build",
+    ".mak":  "build",
+    ".make": "build",
+    ".cmake": "build",
     ".c":    "c",
     ".h":    "c",
 }
+
+FILENAME_MAP = {
+    "makefile": "build",
+    "gnumakefile": "build",
+    "cmakelists.txt": "build",
+}
+
 
 
 RULES = {
@@ -451,10 +462,32 @@ RULES = {
                              "Weak or hardcoded JWT secret in environment variable"),
         # ── LDAP Injection (SEC051-SEC053) ──
         ("SEC051", "HIGH",   r'\bldapsearch\b.*\$\{?[A-Za-z_]+\}?',
-                             "ldapsearch with unvalidated variable — LDAP injection risk"),
+                             "ldapsearch with unvalidated variable - LDAP injection risk"),
         ("SEC052", "HIGH",   r'\bldap(whoami|passwd|modify|add|delete)\b.*\$\{?[A-Za-z_]+\}?',
-                             "LDAP command with unvalidated variable — injection risk"),
+                             "LDAP command with unvalidated variable - LDAP injection risk"),
+        ("SEC064", "HIGH",   r'(?i)\b-Wl,-z,execstack\b|\b-z\s+execstack\b',
+                             "Executable stack enabled (execstack) - disables NX/DEP, increases ROP risk"),
+        ("SEC064B","HIGH",   r'(?i)\b-(fno-PIE|fno-pie|no-pie)\b',
+                             "PIE disabled - weakens ASLR effectiveness"),
+        ("SEC064C","HIGH",   r'(?i)\b-Wl,-z,norelro\b|\b-z\s+norelro\b',
+                             "RELRO disabled - weakens GOT/PLT protections"),
+        ("SEC064D","HIGH",   r'(?i)\b/NXCOMPAT\s*:\s*NO\b',
+                             "NX/DEP disabled via /NXCOMPAT:NO - executable memory allowed"),
+        ("SEC064E","HIGH",   r'(?i)\b/DYNAMICBASE\s*:\s*NO\b',
+                             "ASLR disabled via /DYNAMICBASE:NO"),
         ("SEC009", "MEDIUM", r'http://',                     "Insecure HTTP protocol"),
+    ],
+    "build": [
+        ("SEC064", "HIGH",   r'(?i)\b-Wl,-z,execstack\b|\b-z\s+execstack\b',
+                             "Executable stack enabled (execstack) - disables NX/DEP, increases ROP risk"),
+        ("SEC064B","HIGH",   r'(?i)\b-(fno-PIE|fno-pie|no-pie)\b',
+                             "PIE disabled - weakens ASLR effectiveness"),
+        ("SEC064C","HIGH",   r'(?i)\b-Wl,-z,norelro\b|\b-z\s+norelro\b',
+                             "RELRO disabled - weakens GOT/PLT protections"),
+        ("SEC064D","HIGH",   r'(?i)\b/NXCOMPAT\s*:\s*NO\b',
+                             "NX/DEP disabled via /NXCOMPAT:NO - executable memory allowed"),
+        ("SEC064E","HIGH",   r'(?i)\b/DYNAMICBASE\s*:\s*NO\b',
+                             "ASLR disabled via /DYNAMICBASE:NO"),
     ],
     "c": [
         ("SEC060", "MEDIUM", r'\bmmap\s*\([^;]*\bPROT_EXEC\b',
@@ -465,6 +498,24 @@ RULES = {
                              "Executable memory allocation (PAGE_EXECUTE*) - review for shellcode/JIT safety"),
         ("SEC060D","MEDIUM", r'\bVirtualProtect\s*\([^;]*\bPAGE_EXECUTE(?:_READ|_READWRITE|_WRITECOPY)?\b',
                              "Memory protection changed to executable (PAGE_EXECUTE*) - review for shellcode/JIT safety"),
+        ("SEC061", "HIGH",   r'\b(printf|vprintf|wprintf|vwprintf|printf_s)\s*\(\s*(argv\s*\[|getenv\s*\(|gets\s*\(|fgets\s*\(|scanf\s*\(|read\s*\(|recv\s*\(|getline\s*\(|getopt\s*\()',
+                             "Possible format string vulnerability: printf-family format from user-controlled input"),
+        ("SEC061", "HIGH",   r'\b(fprintf|sprintf|snprintf|vfprintf|vsprintf|vsnprintf|dprintf|syslog|err|errx|warn|warnx|asprintf|vasprintf)\s*\(\s*[^,]+,\s*(argv\s*\[|getenv\s*\(|gets\s*\(|fgets\s*\(|scanf\s*\(|read\s*\(|recv\s*\(|getline\s*\(|getopt\s*\()',
+                             "Possible format string vulnerability: printf-family format from user-controlled input"),
+        ("SEC062", "HIGH",   r'__attribute__\s*\(\s*\(\s*no_stack_protector\s*\)\s*\)',
+                             "Stack protector explicitly disabled via no_stack_protector attribute"),
+        ("SEC062B","HIGH",   r'__attribute__\s*\(\s*\(\s*optimize\s*\(\s*["\']no-stack-protector["\']\s*\)\s*\)\s*\)',
+                             "Stack protector disabled via optimize(\"no-stack-protector\") attribute"),
+        ("SEC062C","HIGH",   r'__declspec\s*\(\s*safebuffers\s*\)',
+                             "MSVC safebuffers disables /GS stack checks"),
+        ("SEC062D","HIGH",   r'#\s*pragma\s+GCC\s+optimize\s*\(\s*["\']?no-stack-protector["\']?\s*\)',
+                             "GCC pragma disables stack protector"),
+        ("SEC063", "HIGH",   r'\bpersonality\s*\(\s*[^;]*\bADDR_NO_RANDOMIZE\b',
+                             "ASLR explicitly disabled via personality(ADDR_NO_RANDOMIZE)"),
+        ("SEC063B","HIGH",   r'#\s*pragma\s+comment\s*\(\s*linker\s*,\s*["\']/DYNAMICBASE:NO["\']\s*\)',
+                             "ASLR disabled via linker option /DYNAMICBASE:NO"),
+        ("SEC065", "HIGH",   r'\bfree\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;\s*[^;]*\b(\1\s*->|\1\s*\[|\*\s*\1|\1\s*\.)',
+                             "Potential use-after-free: pointer dereferenced after free on same line"),
     ],
 }
 
@@ -521,6 +572,8 @@ def scan_python_ast(path: Path) -> list[Finding]:
 
 def scan_file(path: Path) -> list[Finding]:
     language = EXTENSION_MAP.get(path.suffix.lower())
+    if not language:
+        language = FILENAME_MAP.get(path.name.lower())
     if not language:
         return []
 

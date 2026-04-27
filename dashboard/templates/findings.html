@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Findings — {{ r.name }}{% endblock %}
+{% block content %}
+
+<div class="crumbs">
+  <a href="{{ url_for('reports') }}">Reports</a>
+  <span class="sep">/</span>
+  <a href="{{ url_for('report', report_id=r.id) }}">{{ r.name }}</a>
+  <span class="sep">/</span>
+  <span>Findings</span>
+</div>
+
+<div class="page-head">
+  <h1>Findings</h1>
+  <span class="muted">{{ rows|length }} of {{ r.total }}</span>
+</div>
+
+<form class="filterbar" method="get">
+  <input class="grow" type="search" name="q" placeholder="Filter by file, message, or snippet…"
+         value="{{ active.q }}">
+  <select name="severity">
+    <option value="">All severities</option>
+    {% for s in ['HIGH','MEDIUM','LOW'] %}
+      <option value="{{ s }}" {% if active.severity == s %}selected{% endif %}>{{ s|title }}</option>
+    {% endfor %}
+  </select>
+  <select name="language">
+    <option value="">All languages</option>
+    {% for l in languages %}
+      <option value="{{ l }}" {% if active.language == l %}selected{% endif %}>{{ l }}</option>
+    {% endfor %}
+  </select>
+  <select name="rule_id">
+    <option value="">All rules</option>
+    {% for rid in rule_ids %}
+      <option value="{{ rid }}" {% if active.rule_id == rid %}selected{% endif %}>{{ rid }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn" type="submit">Apply</button>
+  <a class="btn" href="{{ url_for('findings', report_id=r.id) }}">Reset</a>
+</form>
+
+{% if not rows %}
+  <div class="card">
+    <div class="empty">
+      <div class="big">No findings match</div>
+      <div>Try clearing some filters.</div>
+    </div>
+  </div>
+{% else %}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 90px;">Severity</th>
+        <th style="width: 90px;">Rule</th>
+        <th style="width: 90px;">Lang</th>
+        <th>Location</th>
+        <th>Message</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in rows %}
+      <tr onclick="this.nextElementSibling.classList.toggle('open')" style="cursor:pointer">
+        <td><span class="sev sev-{{ f.severity|lower }}">{{ f.severity }}</span></td>
+        <td><a href="{{ url_for('rule', report_id=r.id, rule_id=f.rule_id) }}"><strong>{{ f.rule_id }}</strong></a></td>
+        <td class="muted">{{ f.language }}</td>
+        <td class="mono">{{ f.file|relpath }}<span class="subtle">:{{ f.line }}</span></td>
+        <td>{{ f.message }}</td>
+      </tr>
+      <tr class="snippet-row" style="display:none">
+        <td colspan="5">
+          {% if f.code_snippet %}
+            <pre class="snippet"><span class="ln">{{ f.line }}</span>{{ f.code_snippet }}</pre>
+          {% else %}
+            <span class="subtle">No snippet captured.</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Toggle code snippet rows on click.
+  document.querySelectorAll('tr.snippet-row').forEach(r => {
+    r.addEventListener('click', () => r.style.display = 'none');
+  });
+  document.querySelectorAll('tbody tr:not(.snippet-row)').forEach(r => {
+    r.addEventListener('click', () => {
+      const next = r.nextElementSibling;
+      if (next && next.classList.contains('snippet-row')) {
+        next.style.display = next.style.display === 'table-row' ? 'none' : 'table-row';
+      }
+    });
+  });
+</script>
+{% endblock %}

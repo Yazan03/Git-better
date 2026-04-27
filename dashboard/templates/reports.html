@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Reports — Scanner{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <h1>Reports</h1>
+  <a class="btn" href="{{ url_for('index') }}">+ New scan</a>
+</div>
+
+{% if not reports %}
+  <div class="card">
+    <div class="empty">
+      <div class="big">No reports yet</div>
+      <div>Upload a scan from the home page to get started.</div>
+    </div>
+  </div>
+{% else %}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th><th>Source</th>
+        <th class="right">Findings</th><th class="right">H</th><th class="right">M</th><th class="right">L</th>
+        <th>Uploaded</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in reports %}
+      <tr>
+        <td><a href="{{ url_for('report', report_id=r.id) }}"><strong>{{ r.name }}</strong></a></td>
+        <td class="muted">{{ r.source }}</td>
+        <td class="right">{{ r.total }}</td>
+        <td class="right">{% if r.high %}<span class="sev sev-high">{{ r.high }}</span>{% else %}—{% endif %}</td>
+        <td class="right">{% if r.medium %}<span class="sev sev-medium">{{ r.medium }}</span>{% else %}—{% endif %}</td>
+        <td class="right">{% if r.low %}<span class="sev sev-low">{{ r.low }}</span>{% else %}—{% endif %}</td>
+        <td class="muted">{{ r.uploaded_at|ago }}</td>
+        <td class="right">
+          <form method="post" action="{{ url_for('delete_report', report_id=r.id) }}"
+                onsubmit="return confirm('Delete this report?')" style="display:inline">
+            <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}

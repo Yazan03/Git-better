@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}{{ r.name }} — Scanner{% endblock %}
+{% block content %}
+
+<div class="crumbs">
+  <a href="{{ url_for('reports') }}">Reports</a>
+  <span class="sep">/</span>
+  <span>{{ r.name }}</span>
+</div>
+
+<div class="page-head">
+  <h1>{{ r.name }}</h1>
+  <span class="muted">{{ r.uploaded_at|ago }} · source: {{ r.source }}</span>
+  <a class="btn" href="{{ url_for('findings', report_id=r.id) }}">All findings →</a>
+</div>
+
+<div class="stats">
+  <div class="stat">
+    <div class="label">Total</div>
+    <div class="value">{{ r.total }}</div>
+  </div>
+  <div class="stat high">
+    <div class="label">High</div>
+    <div class="value">{{ r.high }}</div>
+  </div>
+  <div class="stat medium">
+    <div class="label">Medium</div>
+    <div class="value">{{ r.medium }}</div>
+  </div>
+  <div class="stat low">
+    <div class="label">Low</div>
+    <div class="value">{{ r.low }}</div>
+  </div>
+</div>
+
+<div class="card-row">
+  <div class="card">
+    <h2>Severity</h2>
+    {% if r.total %}
+    <div class="chart-wrap"><canvas id="sev"></canvas></div>
+    {% else %}
+    <div class="empty"><div class="big">Clean run</div><div>No findings.</div></div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>By language</h2>
+    {% if by_lang %}
+    <table>
+      <tbody>
+        {% for lang, count in by_lang.items() %}
+          <tr>
+            <td><strong>{{ lang }}</strong></td>
+            <td class="right">{{ count }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No findings.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card-row" style="margin-top: 16px;">
+  <div class="card">
+    <h2>Top rules</h2>
+    {% if by_rule %}
+    <table>
+      <tbody>
+        {% for rule, count in by_rule %}
+          <tr>
+            <td><a href="{{ url_for('rule', report_id=r.id, rule_id=rule) }}"><strong>{{ rule }}</strong></a></td>
+            <td class="right">{{ count }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No findings.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Top files</h2>
+    {% if by_file %}
+    <table>
+      <tbody>
+        {% for file, count in by_file %}
+          <tr>
+            <td class="mono">{{ file|relpath }}</td>
+            <td class="right">{{ count }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No findings.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{% if r.total %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+  // Read CSS variables so the chart respects light/dark.
+  const css = getComputedStyle(document.documentElement);
+  const v = n => css.getPropertyValue(n).trim();
+
+  new Chart(document.getElementById('sev'), {
+    type: 'doughnut',
+    data: {
+      labels: ['High', 'Medium', 'Low'],
+      datasets: [{
+        data: [{{ r.high }}, {{ r.medium }}, {{ r.low }}],
+        backgroundColor: [v('--high-fg'), v('--med-fg'), v('--low-fg')],
+        borderColor: v('--panel'),
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '62%',
+      plugins: {
+        legend: {
+          position: 'right',
+          labels: { color: v('--text'), font: { size: 12 }, boxWidth: 10, boxHeight: 10 }
+        },
+      },
+    },
+  });
+</script>
+{% endif %}
+{% endblock %}

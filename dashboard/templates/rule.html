@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}{{ rule_id }} — {{ r.name }}{% endblock %}
+{% block content %}
+
+<div class="crumbs">
+  <a href="{{ url_for('reports') }}">Reports</a>
+  <span class="sep">/</span>
+  <a href="{{ url_for('report', report_id=r.id) }}">{{ r.name }}</a>
+  <span class="sep">/</span>
+  <a href="{{ url_for('findings', report_id=r.id) }}">Findings</a>
+  <span class="sep">/</span>
+  <span>{{ rule_id }}</span>
+</div>
+
+<div class="page-head">
+  <h1>{{ rule_id }}</h1>
+  <span class="sev sev-{{ rows[0].severity|lower }}">{{ rows[0].severity }}</span>
+  <span class="muted">{{ rows|length }} occurrence{{ '' if rows|length == 1 else 's' }}</span>
+</div>
+
+<div class="card" style="margin-bottom: 16px;">
+  <h3 style="margin-bottom: 6px;">Description</h3>
+  <p style="margin: 0;">{{ rows[0].message }}</p>
+</div>
+
+{% for f in rows %}
+<div class="card">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+    <div class="mono">{{ f.file|relpath }}<span class="subtle">:{{ f.line }}</span></div>
+    <span class="muted">{{ f.language }}</span>
+  </div>
+  {% if f.code_snippet %}
+  <pre class="snippet"><span class="ln">{{ f.line }}</span>{{ f.code_snippet }}</pre>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% endblock %}

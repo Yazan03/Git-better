@@ -51,7 +51,7 @@ FILENAME_MAP = {
 
 RULES = {
     "python": [
-        ("SEC001", "HIGH",   r'(-i)(password|api_key|secret|token)\s*=\s*["\'][^"\']{4,}["\']',
+        ("SEC001", "HIGH",   r'\b(password|api_key|secret|token)\s*=\s*["\'][^"\']{4,}["\']',
                              "Hardcoded secret in variable"),
         ("SEC002", "HIGH",   r'\beval\s*\(',                  "Use of eval()"),
         ("SEC002", "HIGH",   r'\bexec\s*\(',                  "Use of exec()"),
@@ -90,7 +90,7 @@ RULES = {
         ("SEC037", "MEDIUM", r'["\']/etc/(passwd|shadow|hosts|group)|/proc/self/(environ|cmdline|maps|fd/)|\.ssh/(id_rsa|authorized_keys)',
                              "Reference to sensitive system file — possible LFI target"),
         ("SEC042", "MEDIUM", r'/proc/(self|[0-9]+)/(environ|cmdline|maps|status|fd/|cwd|root)',
-                             "Access to /proc filesystem ��� information disclosure risk"),
+                             "Access to /proc filesystem — information disclosure risk"),
         # ── JWT Security (SEC043-SEC050) ──
         ("SEC043", "HIGH",   r'(?i)\balgorithms?\s*=\s*[\[\(]?\s*["\']none["\']',
                              "JWT 'none' algorithm — allows unsigned token forgery"),
@@ -127,7 +127,7 @@ RULES = {
     ],
 
     "javascript": [
-        ("SEC001", "HIGH",   r'(-i)(password|api_key|secret|token)\s*=\s*["\'][^"\']{4,}["\']',
+        ("SEC001", "HIGH",   r'\b(password|api_?key|secret|token|access_?token|auth_?token)\s*[=:]\s*["\'][^"\']{4,}["\']',
                              "Hardcoded secret"),
         ("SEC002", "HIGH",   r'\beval\s*\(',                  "Use of eval()"),
         ("SEC006", "HIGH",   r'innerHTML\s*=',                "XSS risk via innerHTML assignment"),
@@ -147,8 +147,6 @@ RULES = {
                              "File upload request data is referenced - ensure file validation and sanitizer usage"),
         ("SEC034", "MEDIUM", r'\b(path\.extname|mime\.lookup|file\.type)\b',
                              "File type/extension inspection found; confirm strict allowlist behavior"),
-        ("SEC026", "HIGH",   r'\b(Handlebars|Mustache)\.compile\s*\(|\b_\.template\s*\(|\bng-bind-html\b|\$sce\.trustAsHtml\s*\(|\bv-html\s*=|\{\{\{[^}]+\}\}\}',
-                             "Client-side template injection risk"),
         # ── Path Traversal / File Inclusion (SEC027, SEC035-SEC042) ──
         ("SEC035", "HIGH",   r'\bfs\.(readFile|readFileSync|createReadStream|writeFile|writeFileSync|existsSync|access|open|stat)\s*\(.*\b(req\.(params|query|body|path)|request\.(params|query|body))',
                              "File system operation with user-controlled input — path traversal risk"),
@@ -187,9 +185,9 @@ RULES = {
         # -- Open Redirect (SEC056) --
         ("SEC056", "MEDIUM", r'\b(res|response)\.redirect\s*\(.*\b(req\.(query|params|body)|request\.(query|params|body))',
                              "Redirect with user-controlled input - open redirect risk"),
-        # â”€â”€ NoSQL Injection (SEC054-SEC055) â”€â”€
+        # ── NoSQL Injection (SEC054-SEC055) ──
         ("SEC054", "HIGH",   r'["\']\$where["\']',
-                             "MongoDB $where executes JavaScript â€” NoSQL injection risk if user-controlled"),
+                             "MongoDB $where executes JavaScript — NoSQL injection risk if user-controlled"),
         ("SEC004", "HIGH",   r'(query|sql)\s*[=+]\s*[`"\'].*\$\{', "Possible SQL injection via template literal"),
         ("SEC057", "MEDIUM", r'\b(graphql|execute|executeOperation)\s*\(.*\b(req\.(body|query|params)|request\.(body|query|params))',
                              "GraphQL execution with user input as query string - injection risk"),
@@ -206,7 +204,7 @@ RULES = {
     ],
 
     "php": [
-        ("SEC001", "HIGH",   r'(-i)(password|api_key|secret)\s*=\s*["\'][^"\']{4,}["\']',
+        ("SEC001", "HIGH",   r'\$?(password|api_key|secret)\s*=\s*["\'][^"\']{4,}["\']',
                              "Hardcoded secret"),
         ("SEC002", "HIGH",   r'\beval\s*\(',                  "Use of eval()"),
         ("SEC011", "HIGH",   r'\$_(GET|POST|REQUEST|COOKIE)\[', "Unsanitised user input"),
@@ -218,12 +216,6 @@ RULES = {
         ("SEC013", "HIGH",   r'\bmd5\s*\(|\bsha1\s*\(',      "Weak hashing (MD5/SHA1)"),
         ("SEC028", "HIGH",   r'Content-Security-Policy.*(unsafe-inline|unsafe-eval)|header\s*\(\s*["\"]Content-Security-Policy["\"]|http-equiv\s*=\s*["\"]Content-Security-Policy["\"]',
                              "CSP includes unsafe directives (unsafe-inline/unsafe-eval) or insecure meta policy"),
-        ("SEC033", "HIGH",   r'\b(move_uploaded_file|is_uploaded_file)\s*\(',
-                             "High-risk PHP upload sink detected - require strong canonicalization/allowlist before write"),
-        ("SEC033B", "LOW",   r'\b\$_FILES\b',
-                             "PHP file upload data variable used - ensure strict validation of file type/size/filename"),
-        ("SEC034", "MEDIUM", r'\b(pathinfo\s*\(.*PATHINFO_EXTENSION|mime_content_type\(|finfo_file\()\b',
-                             "File type/extension detection is in place; ensure allowlist is used and not bypassed"),
         ("SEC026", "HIGH",   r'\b(template\(|Twig::create|\{\{[^}]+\}\})\b',
                              "Template injection risk"),
         ("SEC026B", "HIGH",  r'\b(Twig\\Environment|Twig_Environment)\b.*\b(createTemplate|render)\s*\(.*\b\$_(GET|POST|REQUEST|COOKIE)',
@@ -294,9 +286,9 @@ RULES = {
         # -- Open Redirect (SEC056) --
         ("SEC056", "MEDIUM", r'header\s*\(\s*["\']Location:\s*["\']\s*\.\s*\$_(GET|POST|REQUEST|COOKIE)|header\s*\(\s*["\']Location:.*\$_(GET|POST|REQUEST|COOKIE)',
                              "Redirect with user-controlled input - open redirect risk"),
-        # â”€â”€ NoSQL Injection (SEC054-SEC055) â”€â”€
+        # ── NoSQL Injection (SEC054-SEC055) ──
         ("SEC054", "HIGH",   r'["\']\$where["\']',
-                             "MongoDB $where executes JavaScript â€” NoSQL injection risk if user-controlled"),
+                             "MongoDB $where executes JavaScript — NoSQL injection risk if user-controlled"),
         ("SEC014", "MEDIUM", r'error_reporting\s*\(\s*E_ALL', "Verbose error reporting enabled"),
         ("SEC024", "MEDIUM", r'\bNormalizer::normalize\s*\(|\bnormalizer_normalize\s*\(',
                              "Unicode normalization on input - potential normalization/IDN injection risk"),        ("SEC025", "MEDIUM", r'\bidn_to_(ascii|utf8)\s*\(',
@@ -306,7 +298,7 @@ RULES = {
     ],
 
     "java": [
-        ("SEC001", "HIGH",   r'(-i)(password|apiKey|secret)\s*=\s*"[^"]{4,}"',
+        ("SEC001", "HIGH",   r'\b(password|apiKey|secret)\s*=\s*"[^"]{4,}"',
                              "Hardcoded secret"),
         ("SEC004", "HIGH",   r'(createQuery|executeQuery|prepareStatement)\s*\(.*\+',
                              "Possible SQL injection via string concatenation"),
@@ -365,9 +357,9 @@ RULES = {
         # -- Open Redirect (SEC056) --
         ("SEC056", "MEDIUM", r'\.sendRedirect\s*\(.*\b(request\.getParameter|getParameter\s*\()',
                              "Redirect with user-controlled input - open redirect risk"),
-        # â”€â”€ NoSQL Injection (SEC054-SEC055) â”€â”€
+        # ── NoSQL Injection (SEC054-SEC055) ──
         ("SEC054", "HIGH",   r'["\']\$where["\']',
-                             "MongoDB $where executes JavaScript â€” NoSQL injection risk if user-controlled"),
+                             "MongoDB $where executes JavaScript — NoSQL injection risk if user-controlled"),
         ("SEC024", "MEDIUM", r'\bNormalizer\.normalize\s*\(',
                              "Unicode normalization on input - potential normalization/IDN injection risk"),        ("SEC025", "MEDIUM", r'\bIDN\.(toASCII|toUnicode)\s*\(',
                              "IDN/punycode conversion - potential homograph/normalization injection risk"),
@@ -376,7 +368,7 @@ RULES = {
     ],
 
     "go": [
-        ("SEC001", "HIGH",   r'(-i)(password|apiKey|secret)\s*:-=\s*"[^"]{4,}"',
+        ("SEC001", "HIGH",   r'\b(password|apiKey|secret)\s*(?::=|=)\s*"[^"]{4,}"',
                              "Hardcoded secret"),
         ("SEC002", "HIGH",   r'\bexec\.Command\s*\(',        "OS command execution"),
         ("SEC004", "HIGH",   r'(Query|Exec)\s*\(.*\+',       "Possible SQL injection via concatenation"),
@@ -427,9 +419,9 @@ RULES = {
         # -- Open Redirect (SEC056) --
         ("SEC056", "MEDIUM", r'\bhttp\.Redirect\s*\(.*\b(r\.(URL\.Query\(\)\.Get|FormValue)|req\.(URL\.Query\(\)\.Get|FormValue))',
                              "Redirect with user-controlled input - open redirect risk"),
-        # â”€â”€ NoSQL Injection (SEC054-SEC055)
+        # ── NoSQL Injection (SEC054-SEC055)
         ("SEC054", "HIGH",   r'["\']\$where["\']',
-                             "MongoDB $where executes JavaScript â€” NoSQL injection risk if user-controlled"),
+                             "MongoDB $where executes JavaScript — NoSQL injection risk if user-controlled"),
         ("SEC024", "MEDIUM", r'\bnorm\.(NFC|NFD|NFKC|NFKD)\.(String|Bytes)\s*\(',
                              "Unicode normalization on input - potential normalization/IDN injection risk"),        ("SEC025", "MEDIUM", r'\b(idna\.(ToASCII|ToUnicode)|golang\.org/x/net/idna)\b',
                              "IDN/punycode conversion - potential homograph/normalization injection risk"),
@@ -438,12 +430,13 @@ RULES = {
     ],
 
     "bash": [
-        ("SEC001", "HIGH",   r'(-i)(PASSWORD|API_KEY|SECRET|TOKEN)=["\']-[^"\'$\s]{4,}',
+        ("SEC001", "HIGH",   r'\b(PASSWORD|API_KEY|SECRET|TOKEN)=["\'][^"\'$\s]{4,}',
                              "Hardcoded secret in env variable"),
         ("SEC020", "HIGH",   r'curl.*(-k|--insecure)',       "curl with SSL verification disabled"),
         ("SEC021", "HIGH",   r'eval\s+',                     "Use of eval in shell script"),
         ("SEC022", "MEDIUM", r'chmod\s+777',                 "Overly permissive file permissions"),
-        ("SEC023", "MEDIUM", r'\$[A-Za-z_]+\s*without quotes', "Unquoted variable — word splitting risk"),
+        ("SEC023", "MEDIUM", r'\b(rm|cp|mv|eval|bash|sh|chmod|chown|tar|find|cat|export|source|\.|exec)\s+[^|"\'\n]*?(?<![\'"])\$[A-Za-z_][A-Za-z0-9_]*(?!["\'])',
+                             "Unquoted shell variable in command — word-splitting/globbing risk"),
         ("SEC026", "HIGH",   r'\b(curl\s+.*--data|wget\s+.*--post-data|envsubst|sed\s+.*\$\{)|\$\{[^}]+\}\}',
                              "Possible command/template injection risk"),
         # ── Path Traversal / File Inclusion (SEC027, SEC035-SEC042) ──

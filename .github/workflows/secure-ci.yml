@@ -46,7 +46,8 @@ jobs:
 
       - name: Custom Scanner
         run: |
-          python scripts/vuln_scanner.py --path . --output custom-report.json || true
+          python scripts/vuln_scanner.py --path . --output custom-report.json \
+            --exclude venv .venv node_modules __pycache__ dist build test tests || true
 
       - name: Evaluate Results
         run: |

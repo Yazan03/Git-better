@@ -45,9 +45,12 @@ jobs:
           fi
 
       - name: Custom Scanner
+        # `scripts` is excluded because the scanner's own rule definitions
+        # contain literal strings (eval(, %2e%2e, etc.) that match other rules.
+        # `test`/`tests` hold deliberate vulnerability fixtures.
         run: |
           python scripts/vuln_scanner.py --path . --output custom-report.json \
-            --exclude venv .venv node_modules __pycache__ dist build test tests || true
+            --exclude venv .venv node_modules __pycache__ dist build test tests scripts || true
 
       - name: Evaluate Results
         run: |

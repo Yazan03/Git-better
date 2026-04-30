@@ -19,11 +19,16 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install Tools
         run: |
           python -m pip install --upgrade pip
           pip install bandit safety
+          pip install -r requirements-dev.txt
+
+      - name: Scanner Unit Tests
+        run: pytest tests/ -v
 
       - name: Bandit Scan
         run: |
@@ -40,8 +45,12 @@ jobs:
           fi
 
       - name: Custom Scanner
+        # `scripts` is excluded because the scanner's own rule definitions
+        # contain literal strings (eval(, %2e%2e, etc.) that match other rules.
+        # `test`/`tests` hold deliberate vulnerability fixtures.
         run: |
-          python scripts/vuln_scanner.py --path . --output custom-report.json || true
+          python scripts/vuln_scanner.py --path . --output custom-report.json \
+            --exclude venv .venv node_modules __pycache__ dist build test tests scripts || true
 
       - name: Evaluate Results
         run: |

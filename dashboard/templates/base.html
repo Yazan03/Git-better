@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Scanner Dashboard{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a href="{{ url_for('index') }}" class="brand">
+      <span class="dot"></span>
+      <span>Scanner</span>
+    </a>
+    <nav>
+      <a href="{{ url_for('index') }}"
+         class="{{ 'active' if request.endpoint == 'index' else '' }}">Upload</a>
+      <a href="{{ url_for('reports') }}"
+         class="{{ 'active' if request.endpoint == 'reports' else '' }}">Reports</a>
+    </nav>
+    <span class="spacer"></span>
+    {% block topbar_right %}{% endblock %}
+  </header>
+
+  <main class="container">
+    {% with messages = get_flashed_messages() %}
+      {% for m in messages %}
+        <div class="flash">{{ m }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

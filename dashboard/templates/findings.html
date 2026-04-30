@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Findings — {{ r.name }}{% endblock %}
+{% block content %}
+
+<div class="crumbs">
+  <a href="{{ url_for('reports') }}">Reports</a>
+  <span class="sep">/</span>
+  <a href="{{ url_for('report', report_id=r.id) }}">{{ r.name }}</a>
+  <span class="sep">/</span>
+  <span>Findings</span>
+</div>
+
+<div class="page-head">
+  <h1>Findings</h1>
+  <span class="muted">{{ rows|length }} of {{ r.total }}</span>
+</div>
+
+<form class="filterbar" method="get">
+  <input class="grow" type="search" name="q" placeholder="Filter by file, message, or snippet…"
+         value="{{ active.q }}" aria-label="Search findings">
+  <select name="severity" aria-label="Severity">
+    <option value="">All severities</option>
+    {% for s in ['HIGH','MEDIUM','LOW'] %}
+      <option value="{{ s }}" {% if active.severity == s %}selected{% endif %}>{{ s|title }}</option>
+    {% endfor %}
+  </select>
+  <select name="language" aria-label="Language">
+    <option value="">All languages</option>
+    {% for l in languages %}
+      <option value="{{ l }}" {% if active.language == l %}selected{% endif %}>{{ l }}</option>
+    {% endfor %}
+  </select>
+  <select name="rule_id" aria-label="Rule">
+    <option value="">All rules</option>
+    {% for rid in rule_ids %}
+      <option value="{{ rid }}" {% if active.rule_id == rid %}selected{% endif %}>{{ rid }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn" type="submit">Apply</button>
+  <a class="btn" href="{{ url_for('findings', report_id=r.id) }}">Reset</a>
+</form>
+
+{% if not rows %}
+  <div class="card">
+    <div class="empty">
+      <svg class="empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none"
+           stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+      </svg>
+      <div class="big">No findings match</div>
+      <div>Try clearing some filters.</div>
+    </div>
+  </div>
+{% else %}
+<div class="table-wrap">
+  <table class="findings-table">
+    <thead>
+      <tr>
+        <th style="width: 90px;">Severity</th>
+        <th style="width: 90px;">Rule</th>
+        <th style="width: 90px;">Lang</th>
+        <th>Location</th>
+        <th>Message</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in rows %}
+      <tr class="finding-row sev-row-{{ f.severity|lower }}"
+          tabindex="0" role="button" aria-expanded="false"
+          aria-controls="snippet-{{ loop.index }}">
+        <td><span class="sev sev-{{ f.severity|lower }}">{{ f.severity }}</span></td>
+        <td><a href="{{ url_for('rule', report_id=r.id, rule_id=f.rule_id) }}" onclick="event.stopPropagation()"><strong>{{ f.rule_id }}</strong></a></td>
+        <td class="muted">{{ f.language }}</td>
+        <td class="mono">{{ f.file|relpath }}<span class="subtle">:{{ f.line }}</span></td>
+        <td>{{ f.message }}</td>
+      </tr>
+      <tr class="snippet-row" id="snippet-{{ loop.index }}" hidden>
+        <td colspan="5">
+          {% set meta = RULE_META.get(f.rule_id) %}
+          {% if meta %}
+          <div class="vuln-detail sev-row-{{ f.severity|lower }}">
+            <div class="vuln-head">
+              <div class="vuln-title">{{ meta.title }}</div>
+              <div class="vuln-refs">
+                <span class="badge">{{ meta.cwe }}</span>
+                <span class="badge">{{ meta.owasp }}</span>
+              </div>
+            </div>
+            <div class="vuln-grid">
+              <div class="vuln-section">
+                <span class="vuln-label">What</span>
+                <span>{{ meta.what }}</span>
+              </div>
+              <div class="vuln-section">
+                <span class="vuln-label">Impact</span>
+                <span>{{ meta.impact }}</span>
+              </div>
+              <div class="vuln-section vuln-fix-box">
+                <span class="vuln-label">How to Fix</span>
+                <span>{{ meta.fix }}</span>
+              </div>
+            </div>
+            {% if f.code_snippet %}
+            <div class="vuln-snippet">
+              <div class="vuln-label" style="margin-bottom:6px;">Vulnerable Code</div>
+              <pre class="snippet"><span class="ln">{{ f.line }}</span>{{ f.code_snippet }}</pre>
+            </div>
+            {% endif %}
+          </div>
+          {% else %}
+            <div class="vuln-detail">
+              <div class="vuln-section">
+                <span class="vuln-label">Message</span>
+                <span>{{ f.message }}</span>
+              </div>
+              {% if f.code_snippet %}
+                <pre class="snippet"><span class="ln">{{ f.line }}</span>{{ f.code_snippet }}</pre>
+              {% else %}
+                <span class="subtle">No snippet captured.</span>
+              {% endif %}
+            </div>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function toggleRow(row) {
+    const next = row.nextElementSibling;
+    if (!next || !next.classList.contains('snippet-row')) return;
+    const open = !next.hasAttribute('hidden');
+    if (open) {
+      next.setAttribute('hidden', '');
+      row.setAttribute('aria-expanded', 'false');
+      row.classList.remove('open');
+    } else {
+      next.removeAttribute('hidden');
+      row.setAttribute('aria-expanded', 'true');
+      row.classList.add('open');
+    }
+  }
+
+  document.querySelectorAll('tr.finding-row').forEach(row => {
+    row.addEventListener('click', () => toggleRow(row));
+    row.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleRow(row);
+      } else if (e.key === 'Escape' && row.getAttribute('aria-expanded') === 'true') {
+        toggleRow(row);
+      }
+    });
+  });
+</script>
+{% endblock %}

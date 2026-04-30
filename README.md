@@ -194,6 +194,22 @@ The scanner outputs a JSON report and exits with code `1` if any HIGH findings a
 }
 ```
 
+### Web dashboard
+
+A Flask dashboard ships in `dashboard/` for browsing scan results visually:
+upload an existing JSON report or a `.zip` of source code (which the dashboard
+will scan for you), then explore findings with severity breakdowns, per-rule
+drill-downs, filterable tables, and inline code snippets.
+
+```bash
+pip install -r dashboard/requirements.txt
+python3 dashboard/app.py
+# open http://127.0.0.1:5000
+```
+
+Reports are persisted in `dashboard/data/dashboard.db` (SQLite) and survive
+across restarts.
+
 ### CI pipeline
 
 The GitHub Actions workflow runs on every push and pull request:

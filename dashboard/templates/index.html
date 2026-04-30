@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Upload — Scanner{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <h1>Upload a scan</h1>
+</div>
+
+<div class="upload-tabs" role="tablist">
+  <button type="button" class="upload-tab active" role="tab" aria-selected="true"
+          data-target="tab-file">Upload file</button>
+  <button type="button" class="upload-tab" role="tab" aria-selected="false"
+          data-target="tab-url">From repository URL</button>
+</div>
+
+<div id="tab-file" class="upload-panel">
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" id="upform">
+    <label class="dropzone" id="drop">
+      <input type="file" name="file" id="file" accept=".json,.zip" required>
+      <div><strong>Drop a file here</strong> or click to browse</div>
+      <div class="hint">A scanner <code>.json</code> report — or a <code>.zip</code> of source code we'll scan for you</div>
+      <div class="filename" id="fn"></div>
+    </label>
+    <div style="margin-top: 14px; display: flex; gap: 10px;">
+      <button class="btn btn-primary" type="submit">Continue</button>
+      <a class="btn" href="{{ url_for('reports') }}">View past reports</a>
+    </div>
+  </form>
+</div>
+
+<div id="tab-url" class="upload-panel" hidden>
+  <form method="post" action="{{ url_for('upload_url') }}" class="repo-form">
+    <label class="field">
+      <span class="field-label">Repository URL</span>
+      <input type="url" name="repo_url" required
+             placeholder="https://github.com/owner/repo"
+             pattern="https://(github\.com|gitlab\.com|bitbucket\.org|codeberg\.org)/[^/]+/[^/]+/?.*"
+             autocomplete="off" spellcheck="false">
+    </label>
+    <label class="field">
+      <span class="field-label">Branch or tag <span class="muted">(optional)</span></span>
+      <input type="text" name="ref" placeholder="main"
+             autocomplete="off" spellcheck="false">
+    </label>
+    <div class="hint" style="margin-top:8px;">
+      Public repos only. Allowed hosts: <code>github.com</code>, <code>gitlab.com</code>,
+      <code>bitbucket.org</code>, <code>codeberg.org</code>. Shallow-cloned with a 90s timeout.
+    </div>
+    <div style="margin-top: 14px; display: flex; gap: 10px;">
+      <button class="btn btn-primary" type="submit">Clone &amp; scan</button>
+      <a class="btn" href="{{ url_for('reports') }}">View past reports</a>
+    </div>
+  </form>
+</div>
+
+{% if not recent %}
+<div class="card" style="margin-top: 28px;">
+  <div class="empty">
+    <svg class="empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none"
+         stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <path d="M14 2v6h6"/><path d="M9 14l2 2 4-4"/>
+    </svg>
+    <div class="big">No reports yet</div>
+    <div>Drop a scanner JSON or a zip of source above to get started.</div>
+  </div>
+</div>
+{% else %}
+<div style="margin-top: 36px;">
+  <h3 style="margin-bottom: 10px;">Recent</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>Source</th><th class="right">Findings</th>
+          <th class="right">High</th><th class="right">Medium</th><th class="right">Low</th>
+          <th>Uploaded</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in recent %}
+        <tr onclick="location='{{ url_for('report', report_id=r.id) }}'" style="cursor:pointer">
+          <td><strong>{{ r.name }}</strong></td>
+          <td class="muted">{{ r.source }}</td>
+          <td class="right">{{ r.total }}</td>
+          <td class="right">{% if r.high %}<span class="sev sev-high">{{ r.high }}</span>{% else %}—{% endif %}</td>
+          <td class="right">{% if r.medium %}<span class="sev sev-medium">{{ r.medium }}</span>{% else %}—{% endif %}</td>
+          <td class="right">{% if r.low %}<span class="sev sev-low">{{ r.low }}</span>{% else %}—{% endif %}</td>
+          <td class="muted">{{ r.uploaded_at|ago }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Tab toggle
+  const tabs = document.querySelectorAll('.upload-tab');
+  const panels = document.querySelectorAll('.upload-panel');
+  tabs.forEach(t => t.addEventListener('click', () => {
+    const target = t.dataset.target;
+    tabs.forEach(x => {
+      const on = x === t;
+      x.classList.toggle('active', on);
+      x.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panels.forEach(p => {
+      if (p.id === target) p.removeAttribute('hidden');
+      else p.setAttribute('hidden', '');
+    });
+  }));
+
+  const drop = document.getElementById('drop');
+  const file = document.getElementById('file');
+  const fn = document.getElementById('fn');
+  ['dragenter','dragover'].forEach(e =>
+    drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave','drop'].forEach(e =>
+    drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', ev => {
+    if (ev.dataTransfer.files.length) {
+      file.files = ev.dataTransfer.files;
+      fn.textContent = file.files[0].name;
+    }
+  });
+  file.addEventListener('change', () => {
+    fn.textContent = file.files[0] ? file.files[0].name : '';
+  });
+</script>
+{% endblock %}

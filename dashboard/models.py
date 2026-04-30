@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, create_engine,
+    Column, Integer, String, Text, DateTime, ForeignKey, create_engine, text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
@@ -12,17 +12,24 @@ class Report(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False)
-    source = Column(String(32), nullable=False)  # "json" | "scan"
-    uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    source = Column(String(32), nullable=False)  # "json" | "scan" | "rescan"
+    uploaded_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+    )
     total = Column(Integer, default=0)
     high = Column(Integer, default=0)
     medium = Column(Integer, default=0)
     low = Column(Integer, default=0)
     by_language = Column(Text, default="{}")  # JSON-encoded
+    parent_id = Column(Integer, ForeignKey("reports.id"), nullable=True, index=True)
+    zip_filename = Column(String(255), nullable=True)
+    repo_url = Column(String(512), nullable=True)
+    repo_ref = Column(String(255), nullable=True)
 
     findings = relationship(
         "Finding", back_populates="report", cascade="all, delete-orphan"
     )
+    parent = relationship("Report", remote_side=[id], backref="rescans")
 
 
 class Finding(Base):
@@ -41,7 +48,22 @@ class Finding(Base):
     report = relationship("Report", back_populates="findings")
 
 
+def _migrate(engine):
+    """Idempotent column adds for SQLite — no Alembic dependency."""
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(reports)"))}
+        if "parent_id" not in cols:
+            conn.execute(text("ALTER TABLE reports ADD COLUMN parent_id INTEGER"))
+        if "zip_filename" not in cols:
+            conn.execute(text("ALTER TABLE reports ADD COLUMN zip_filename VARCHAR(255)"))
+        if "repo_url" not in cols:
+            conn.execute(text("ALTER TABLE reports ADD COLUMN repo_url VARCHAR(512)"))
+        if "repo_ref" not in cols:
+            conn.execute(text("ALTER TABLE reports ADD COLUMN repo_ref VARCHAR(255)"))
+
+
 def make_session(db_path: str):
     engine = create_engine(f"sqlite:///{db_path}", future=True)
     Base.metadata.create_all(engine)
+    _migrate(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)

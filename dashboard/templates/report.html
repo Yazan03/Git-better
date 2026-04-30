@@ -10,9 +10,52 @@
 
 <div class="page-head">
   <h1>{{ r.name }}</h1>
-  <span class="muted">{{ r.uploaded_at|ago }} · source: {{ r.source }}</span>
+  <span class="muted">{{ r.uploaded_at|ago }} · source: {{ r.source }}{% if r.repo_ref %} ({{ r.repo_ref }}){% endif %}</span>
+  {% if r.repo_url %}
+  <a class="repo-link" href="{{ r.repo_url[:-4] if r.repo_url.endswith('.git') else r.repo_url }}"
+     target="_blank" rel="noopener noreferrer" title="Open repository">
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true">
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+    </svg>
+    <span>repo</span>
+  </a>
+  {% endif %}
+  {% if can_rescan %}
+  <form method="post" action="{{ url_for('rescan', report_id=r.id) }}" style="display:inline">
+    <button class="btn" type="submit" title="Re-run the scanner on the original source archive">
+      ↻ Re-scan
+    </button>
+  </form>
+  {% endif %}
   <a class="btn" href="{{ url_for('findings', report_id=r.id) }}">All findings →</a>
 </div>
+
+{% if lineage and lineage|length > 1 %}
+<div class="lineage-bar">
+  <span class="lineage-label">Scan history</span>
+  <div class="lineage-chips">
+    {% for x in lineage %}
+      {% set delta = (x.high - lineage[loop.index0 - 1].high) if not loop.first else 0 %}
+      <a href="{{ url_for('report', report_id=x.id) }}"
+         class="lineage-chip{% if x.id == r.id %} active{% endif %}"
+         title="{{ x.uploaded_at }} · H={{ x.high }} M={{ x.medium }} L={{ x.low }}">
+        <span class="lineage-num">#{{ x.id }}</span>
+        <span class="lineage-time">{{ x.uploaded_at|ago }}</span>
+        <span class="lineage-counts">
+          <span class="sev sev-high">{{ x.high }}</span>
+          <span class="sev sev-medium">{{ x.medium }}</span>
+          <span class="sev sev-low">{{ x.low }}</span>
+        </span>
+        {% if not loop.first %}
+          {% if delta > 0 %}<span class="delta worse">+{{ delta }}</span>
+          {% elif delta < 0 %}<span class="delta better">{{ delta }}</span>
+          {% else %}<span class="delta same">·</span>{% endif %}
+        {% endif %}
+      </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 
 <div class="stats">
   <div class="stat">
@@ -110,6 +153,27 @@
   const css = getComputedStyle(document.documentElement);
   const v = n => css.getPropertyValue(n).trim();
 
+  const centerLabel = {
+    id: 'centerLabel',
+    afterDraw(chart) {
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const cx = (chartArea.left + chartArea.right) / 2;
+      const cy = (chartArea.top + chartArea.bottom) / 2;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = v('--text');
+      ctx.font = '600 22px ' + v('--sans');
+      ctx.fillText('{{ r.total }}', cx, cy - 6);
+      ctx.fillStyle = v('--muted');
+      ctx.font = '500 11px ' + v('--sans');
+      ctx.fillText('TOTAL', cx, cy + 14);
+      ctx.restore();
+    },
+  };
+
+  const isNarrow = window.matchMedia('(max-width: 560px)').matches;
   new Chart(document.getElementById('sev'), {
     type: 'doughnut',
     data: {
@@ -119,19 +183,22 @@
         backgroundColor: [v('--high-fg'), v('--med-fg'), v('--low-fg')],
         borderColor: v('--panel'),
         borderWidth: 2,
+        hoverOffset: 6,
       }],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      cutout: '62%',
+      cutout: '68%',
+      animation: { animateRotate: true, duration: 480 },
       plugins: {
         legend: {
-          position: 'right',
-          labels: { color: v('--text'), font: { size: 12 }, boxWidth: 10, boxHeight: 10 }
+          position: isNarrow ? 'bottom' : 'right',
+          labels: { color: v('--text'), font: { size: 12 }, boxWidth: 10, boxHeight: 10, padding: 12 }
         },
       },
     },
+    plugins: [centerLabel],
   });
 </script>
 {% endif %}

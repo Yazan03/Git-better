@@ -18,10 +18,37 @@
   <span class="muted">{{ rows|length }} occurrence{{ '' if rows|length == 1 else 's' }}</span>
 </div>
 
+{% set meta = RULE_META.get(rule_id) %}
+{% if meta %}
+<div class="card rule-detail sev-row-{{ rows[0].severity|lower }}">
+  <div class="vuln-head">
+    <div class="vuln-title" style="font-size:16px;">{{ meta.title }}</div>
+    <div class="vuln-refs">
+      <span class="badge">{{ meta.cwe }}</span>
+      <span class="badge">{{ meta.owasp }}</span>
+    </div>
+  </div>
+  <div class="vuln-grid">
+    <div class="vuln-section">
+      <span class="vuln-label">What</span>
+      <span>{{ meta.what }}</span>
+    </div>
+    <div class="vuln-section">
+      <span class="vuln-label">Impact</span>
+      <span>{{ meta.impact }}</span>
+    </div>
+    <div class="vuln-section vuln-fix-box">
+      <span class="vuln-label">How to Fix</span>
+      <span>{{ meta.fix }}</span>
+    </div>
+  </div>
+</div>
+{% else %}
 <div class="card" style="margin-bottom: 16px;">
   <h3 style="margin-bottom: 6px;">Description</h3>
   <p style="margin: 0;">{{ rows[0].message }}</p>
 </div>
+{% endif %}
 
 {% for f in rows %}
 <div class="card">

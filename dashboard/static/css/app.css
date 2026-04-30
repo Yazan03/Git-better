@@ -23,8 +23,10 @@
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
 }
 
+/* Dark mode tokens — applied when the OS prefers dark AND no manual choice
+   was made, OR when the user explicitly picked dark via the toggle. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg:          #161614;
     --panel:       #1d1d1b;
     --panel-2:     #232320;
@@ -41,6 +43,50 @@
     --low-fg:  #8db0ff; --low-bg:  #181f30; --low-border:  #233356;
     --shadow: 0 1px 2px rgba(0,0,0,.3);
   }
+}
+
+:root[data-theme="dark"] {
+  --bg:          #161614;
+  --panel:       #1d1d1b;
+  --panel-2:     #232320;
+  --border:      #2c2c28;
+  --border-soft: #242421;
+  --text:        #ececea;
+  --muted:       #9a978f;
+  --muted-2:     #6e6c66;
+  --accent:      #6f9bff;
+  --accent-soft: #1c2a48;
+
+  --high-fg: #ff8b8b; --high-bg: #2a1818; --high-border: #4a2222;
+  --med-fg:  #f0c071; --med-bg:  #2a2316; --med-border:  #4a3d1c;
+  --low-fg:  #8db0ff; --low-bg:  #181f30; --low-border:  #233356;
+  --shadow: 0 1px 2px rgba(0,0,0,.3);
+}
+
+/* Theme toggle button */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--muted-2); }
+.theme-toggle svg { width: 16px; height: 16px; }
+.theme-toggle .icon-sun  { display: none; }
+.theme-toggle .icon-moon { display: block; }
+:root[data-theme="dark"] .theme-toggle .icon-sun  { display: block; }
+:root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-toggle .icon-sun  { display: block; }
+  :root:not([data-theme="light"]) .theme-toggle .icon-moon { display: none; }
 }
 
 /* ─────────────────────────── base ────────────────────────────────────── */

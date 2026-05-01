@@ -741,6 +741,46 @@ def login_post():
     return render_template("login.html", error="Invalid username or password.", next_url=next_url)
 
 
+@app.get("/signup")
+def signup_page():
+    if g.current_user:
+        return redirect(url_for("index"))
+    return render_template("signup.html", error=None)
+
+
+@app.post("/signup")
+def signup_post():
+    username = (request.form.get("username") or "").strip()
+    password = request.form.get("password") or ""
+    confirm = request.form.get("confirm") or ""
+
+    if not username or not password:
+        return render_template("signup.html", error="Username and password are required.")
+    if len(username) < 3:
+        return render_template("signup.html", error="Username must be at least 3 characters.")
+    if len(password) < 6:
+        return render_template("signup.html", error="Password must be at least 6 characters.")
+    if password != confirm:
+        return render_template("signup.html", error="Passwords do not match.")
+
+    with Session() as s:
+        if s.query(User).filter_by(username=username).first():
+            return render_template("signup.html", error="Username already taken.")
+        u = User(
+            username=username,
+            password_hash=generate_password_hash(password),
+            role="member",
+        )
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        s.expunge(u)
+
+    session.clear()
+    session["user_id"] = u.id
+    return redirect(url_for("index"))
+
+
 @app.post("/logout")
 def logout():
     session.clear()

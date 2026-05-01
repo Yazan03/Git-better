@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in — Scanner</title>
+  <title>Sign up — Scanner</title>
   <script>
     (function () {
       try {
@@ -64,6 +64,14 @@
     }
     .login-field input { width: 100%; font-size: 14px; }
     .login-submit { width: 100%; margin-top: 8px; justify-content: center; }
+    .login-footer {
+      margin-top: 18px;
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .login-footer a { color: var(--accent); text-decoration: none; }
+    .login-footer a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -73,26 +81,30 @@
       <span class="dot"></span>
       <span>Scanner</span>
     </div>
-    <h1>Sign in</h1>
+    <h1>Create account</h1>
     {% if error %}
     <div class="login-error">{{ error }}</div>
     {% endif %}
-    <form method="POST" action="{{ url_for('login_page') }}">
-      <input type="hidden" name="next" value="{{ next_url }}">
+    <form method="POST" action="{{ url_for('signup_post') }}">
       <div class="login-field">
         <label for="username">Username</label>
         <input id="username" name="username" type="text"
-               autocomplete="username" autofocus required>
+               autocomplete="username" autofocus required minlength="3">
       </div>
       <div class="login-field">
         <label for="password">Password</label>
         <input id="password" name="password" type="password"
-               autocomplete="current-password" required>
+               autocomplete="new-password" required minlength="6">
       </div>
-      <button type="submit" class="btn btn-primary login-submit">Sign in</button>
+      <div class="login-field">
+        <label for="confirm">Confirm password</label>
+        <input id="confirm" name="confirm" type="password"
+               autocomplete="new-password" required minlength="6">
+      </div>
+      <button type="submit" class="btn btn-primary login-submit">Create account</button>
     </form>
-    <div style="margin-top:18px;font-size:13px;color:var(--muted);text-align:center;">
-      No account? <a href="{{ url_for('signup_page') }}" style="color:var(--accent);text-decoration:none;">Sign up</a>
+    <div class="login-footer">
+      Already have an account? <a href="{{ url_for('login_page') }}">Sign in</a>
     </div>
   </div>
 </div>

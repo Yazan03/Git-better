@@ -144,6 +144,7 @@ code, pre { font-family: var(--mono); font-size: 12.5px; }
   border-bottom-color: var(--text);
 }
 .topbar .spacer { flex: 1; }
+.topbar-user { font-size: 13px; color: var(--muted); margin-right: 8px; }
 
 .container {
   max-width: 1180px;

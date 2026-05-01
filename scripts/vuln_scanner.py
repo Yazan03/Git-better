@@ -4,8 +4,10 @@ Multi-language vulnerability scanner.
 Supports: Python, JavaScript/TypeScript, PHP, Java, Go, Bash, C
 """
 import ast
+import io
 import re
 import json
+import tokenize
 import argparse
 import sys
 from pathlib import Path
@@ -49,6 +51,68 @@ FILENAME_MAP = {
 
 
 
+# ── False-positive suppression helpers ───────────────────────────────────────
+
+def _python_nocode_spans(source: str) -> tuple[list[tuple[int, int]], list[int]]:
+    """
+    Return (spans, line_offsets) for the Python source string.
+
+    spans       : absolute byte-offset ranges (start, end) of every STRING and
+                  COMMENT token.  Regex matches whose start falls inside one of
+                  these ranges are skipped (documentation / comments are not code).
+    line_offsets: line_offsets[i] is the byte offset of the (i+1)-th line in
+                  source (0-indexed), i.e. line_offsets[0]=0, line_offsets[1]=
+                  len(line-1), etc.  Used to convert (line_no, col) → abs offset.
+    """
+    raw_lines = source.splitlines(keepends=True)
+    offsets: list[int] = [0]
+    for ln in raw_lines:
+        offsets.append(offsets[-1] + len(ln))
+
+    spans: list[tuple[int, int]] = []
+    try:
+        for tok_type, _, tok_start, tok_end, _ in tokenize.generate_tokens(
+            io.StringIO(source).readline
+        ):
+            if tok_type in (tokenize.STRING, tokenize.COMMENT):
+                s = offsets[tok_start[0] - 1] + tok_start[1]
+                e = offsets[tok_end[0]   - 1] + tok_end[1]
+                spans.append((s, e))
+    except tokenize.TokenError:
+        pass
+
+    return spans, offsets  # offsets[i] = start of (i+1)-th line
+
+
+# Per-language inline suppression marker (# nosec / // nosec).
+# A line containing this string (case-insensitive) is skipped entirely.
+_NOSEC: dict[str, str] = {
+    "python":     "# nosec",
+    "bash":       "# nosec",
+    "php":        "# nosec",
+    "build":      "# nosec",
+    "javascript": "// nosec",
+    "java":       "// nosec",
+    "go":         "// nosec",
+    "c":          "// nosec",
+}
+
+# Single-line comment prefixes — full lines starting with these are skipped.
+_COMMENT_PREFIX: dict[str, tuple[str, ...]] = {
+    "python":     ("#",),
+    "bash":       ("#",),
+    "build":      ("#",),
+    "javascript": ("//",),
+    "java":       ("//",),
+    "go":         ("//",),
+    "c":          ("//",),
+    "php":        ("//", "#"),
+}
+
+# Languages that support /* … */ block comments.
+_BLOCK_COMMENT_LANGS = frozenset({"javascript", "java", "go", "c", "php"})
+
+
 RULES = {
     "python": [
         ("SEC001", "HIGH",   r'\b(password|api_key|secret|token)\s*=\s*["\'][^"\']{4,}["\']',
@@ -68,8 +132,8 @@ RULES = {
                              "Weak hashing algorithm (MD5/SHA1)"),
         ("SEC028", "HIGH",   r'Content-Security-Policy.*(unsafe-inline|unsafe-eval)|http-equiv\s*=\s*["\"]Content-Security-Policy["\"][^>]*',
                              "CSP includes unsafe directives (unsafe-inline/unsafe-eval) or insecure meta policy"),
-        ("SEC026", "HIGH",   r'\b(jinja2\.Template|render_template_string|Template\(|\{\{[^}]+\}\})\b',
-                             "Possible server-side template injection risk"),
+        ("SEC026", "HIGH",   r'\b(jinja2\.Template|render_template_string)\s*\(',
+                             "Direct template compilation — ensure template source is not user-controlled"),
         ("SEC026B", "HIGH",  r'\b(render_template_string|jinja2\.Template|Environment\.from_string|Template\()\s*\(.*\b(request\.(args|form|values|files|json|GET|POST)|params\[|input\s*\()',
                              "SSTI risk: template source built directly from user input"),
         ("SEC026C", "MEDIUM", r'\b\.\s*from_string\s*\(.*\b(request\.(args|form|values|files|json|GET|POST)|params\[|input\s*\()',
@@ -381,10 +445,10 @@ RULES = {
                              "High-risk Go file upload flow query found - validate filename and destination path"),
         ("SEC033B", "LOW",   r'\b(multipart\.FileHeader|Request\.MultipartForm)\b',
                              "Go multipart upload structs used - make sure file type/size checks are enforced"),
-        ("SEC034", "MEDIUM", r'\b(archive\.Zip|os\.Create|filepath\.Clean|filepath\.Abs)\b',
-                             "Path sanitization call found - ensure it is applied to uploaded file destination paths"),
-        ("SEC026", "HIGH",   r'\b(template\.Execute|template\.Parse|html/template|text/template)\b',
-                             "Possible template injection risk"),
+        ("SEC034", "LOW",    r'\bfilepath\.(Clean|Abs|Base)\s*\(',
+                             "Path sanitization utility detected — confirm it is applied to all user-supplied file paths"),
+        ("SEC026", "HIGH",   r'\b(template\.Execute|template\.Parse|text/template)\b',
+                             "text/template usage — verify template source is not user-controlled (html/template is safe)"),
         ("SEC026B", "HIGH",  r'\btemplate\.(New|Parse|ParseFiles|ParseFS)\s*\(.*\b(r\.(FormValue|URL\.Query\(\)\.Get|PathValue)|req\.(FormValue|URL\.Query\(\)\.Get)|c\.(Param|Query))',
                              "SSTI risk: template source built from user input"),
         # ── Path Traversal / File Inclusion (SEC027, SEC035-SEC042) ──
@@ -514,26 +578,556 @@ RULES = {
 
 
 
-def scan_with_regex(path: Path, language: str) -> list[Finding]:
-    findings = []
-    rules = RULES.get(language, [])
+# ── Context-aware rule skipping ──────────────────────────────────────────────
+#
+# Lines whose entire content matches one of these patterns are exempt from the
+# associated rule.  This eliminates false positives that arise when a vulnerable
+# pattern appears in a context that is structurally safe (e.g. deep relative
+# paths inside static ES import/require statements are resolved at build-time,
+# not at runtime, and carry no user input).
+#
+# Shape: { language: { rule_id: [skip_regex, ...] } }
+
+_RULE_SKIP: dict[str, dict[str, list[str]]] = {
+    "javascript": {
+        # ../../../ in a static import / export-from / require with a literal
+        # path only (no template-literal interpolation, no concatenation).
+        "SEC027": [
+            # ES6: import X from '../../..'  |  import '../../..'
+            r"""^\s*(?:import\b|export\b[^"']*\bfrom\b)\s.*?["'](\.\.\/){2,}[^"'$`{}+]*["']""",
+            # ES6 dynamic import with literal only: import('../../..')
+            r"""^\s*(?:const|let|var)\s+[\w{}\s,*]+\s*=\s*(?:await\s+)?import\s*\(\s*["'](\.\.\/){2,}[^"'$`{}+]*["']\s*\)""",
+            # CommonJS: require('../../..')
+            r"""^\s*(?:(?:const|let|var)\s+[\w{}\s,*]+\s*=\s*)?require\s*\(\s*["'](\.\.\/){2,}[^"'$`{}+]*["']\s*\)""",
+        ],
+    },
+}
+
+
+# ── Taint analysis: sources and sinks ────────────────────────────────────────
+#
+# Sources: expressions that introduce user-controlled data.
+# Sinks  : call sites where tainted data reaching them is dangerous.
+#
+# The cross-line taint engine (scan_taint) uses these for all languages.
+# The Python AST engine (scan_python_ast_taint) has its own typed source/sink
+# tables below (_PY_SOURCE_ATTRS, _PY_SINK_TABLE) for higher precision.
+
+_TAINT_SOURCES: dict[str, list[str]] = {
+    "python": [
+        r'\brequest\.(args|form|values|json|data|cookies|headers|files)\b',
+        r'\brequest\.get(?:_json|_data)\s*\(',
+        r'\binput\s*\(',
+        r'\bsys\.argv\b',
+        r'\bos\.environ\b',
+    ],
+    "javascript": [
+        r'\breq(?:uest)?\.(query|body|params|headers|cookies)\b',
+        r'\bprocess\.argv\b',
+        r'\blocation\.(search|hash|href|pathname)\b',
+        r'\bdocument\.URL\b',
+        r'\bevent\.(target|data|detail)\b',
+    ],
+    "php": [
+        r'\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)\b',
+        r'\bgetenv\s*\(',
+        r'\bphp://input\b',
+    ],
+    "java": [
+        r'\brequest\.getParameter\s*\(',
+        r'\brequest\.getHeader\s*\(',
+        r'\brequest\.(getInputStream|getReader)\s*\(',
+        r'\bgetQueryString\s*\(',
+    ],
+    "go": [
+        r'\b(?:r|req)\.(FormValue|PostFormValue)\s*\(',
+        r'\b(?:r|req)\.URL\.Query\(\)\.Get\s*\(',
+        r'\bc\.(Param|Query|GetHeader)\s*\(',
+        r'\bos\.Args\b',
+    ],
+    "bash": [
+        r'(?<!\$)\$\{?(?:[1-9]|@|\*)\}?',   # positional args $1..$9, $@, $*
+        r'\bread\s+\w+',
+    ],
+}
+
+_TAINT_SINKS: dict[str, list[tuple[str, str, str, str]]] = {
+    "python": [
+        ("SEC004T", "HIGH",
+         r'\b(?:cursor|conn|db|engine|session)\s*\.\s*(?:execute|executemany|scalar|query|raw)\s*\(',
+         "SQL sink — user-controlled variable flows into database query"),
+        ("SEC002T", "HIGH",
+         r'\b(?:os\.system|subprocess\.(?:run|call|check_output|check_call|Popen)|exec)\s*\(',
+         "Command sink — user-controlled variable flows into shell execution"),
+        ("SEC035T", "HIGH",
+         r'\b(?:open|send_file|send_from_directory)\s*\(',
+         "File-operation sink — user-controlled variable used as path"),
+        ("SEC026T", "HIGH",
+         r'\b(?:render_template_string|jinja2\.Template|from_string)\s*\(',
+         "Template sink — user-controlled variable used as template source"),
+        ("SEC056T", "MEDIUM",
+         r'\b(?:redirect|HttpResponseRedirect)\s*\(',
+         "Redirect sink — user-controlled variable used as redirect URL"),
+    ],
+    "javascript": [
+        ("SEC004T", "HIGH",
+         r'\b(?:query|execute|db\.query|pool\.query|connection\.query)\s*\(',
+         "SQL sink — user-controlled variable flows into query"),
+        ("SEC002T", "HIGH",
+         r'\b(?:eval|exec|execSync|execFileSync|spawn|spawnSync)\s*\(',
+         "Command sink — user-controlled variable flows into execution"),
+        ("SEC035T", "HIGH",
+         r'\bfs\.(?:readFile|readFileSync|createReadStream|writeFile|writeFileSync)\s*\(',
+         "File-operation sink — user-controlled variable used as path"),
+        ("SEC006T", "HIGH",
+         r'\binnerHTML\s*=',
+         "DOM sink — user-controlled variable written to innerHTML"),
+        ("SEC056T", "MEDIUM",
+         r'\bres(?:ponse)?\.redirect\s*\(',
+         "Redirect sink — user-controlled variable used as redirect URL"),
+    ],
+    "php": [
+        ("SEC004T", "HIGH",
+         r'\b(?:mysql_query|mysqli_query|->query|->prepare|PDO::query)\s*\(',
+         "SQL sink — user-controlled variable flows into query"),
+        ("SEC002T", "HIGH",
+         r'\b(?:system|exec|shell_exec|passthru|popen)\s*\(',
+         "Command sink — user-controlled variable flows into shell execution"),
+        ("SEC035T", "HIGH",
+         r'\b(?:include|require|include_once|require_once|file_get_contents|fopen)\b',
+         "File-inclusion sink — user-controlled variable used as path"),
+    ],
+    "java": [
+        ("SEC004T", "HIGH",
+         r'\b(?:createQuery|executeQuery|prepareStatement|execute|executeUpdate)\s*\(',
+         "SQL sink — user-controlled variable flows into query"),
+        ("SEC002T", "HIGH",
+         r'\bRuntime\.getRuntime\(\)\.exec\s*\(',
+         "Command sink — user-controlled variable flows into exec()"),
+    ],
+    "go": [
+        ("SEC004T", "HIGH",
+         r'\b(?:db|tx)\.(?:Query|Exec|QueryRow|QueryContext|ExecContext)\s*\(',
+         "SQL sink — user-controlled variable flows into query"),
+        ("SEC002T", "HIGH",
+         r'\bexec\.Command\s*\(',
+         "Command sink — user-controlled variable flows into exec"),
+        ("SEC035T", "HIGH",
+         r'\bos\.(?:Open|ReadFile|OpenFile)\s*\(',
+         "File-operation sink — user-controlled variable used as path"),
+    ],
+}
+
+
+def _lhs_name(line: str, language: str) -> str | None:
+    """
+    Return the simple variable name being assigned on this line, or None.
+
+    Handles:
+      Python / JS / Go  :  name = expr  |  name := expr  |  (const|let|var) name = expr
+      PHP               :  $name = expr
+      Java              :  Type name = expr  |  name = expr
+    """
+    s = line.strip()
+    if language == "php":
+        m = re.match(r'^\$([A-Za-z_]\w*)\s*=(?!=)', s)
+        if m:
+            return "$" + m.group(1)
+    if language == "java":
+        m = re.match(r'^(?:\w+(?:\s*<[^>]*>)?\s+)+([A-Za-z_]\w*)\s*=(?!=)', s)
+        if m:
+            return m.group(1)
+    # Walrus / Go short-assign
+    m = re.match(r'^([A-Za-z_]\w*)\s*:=', s)
+    if m:
+        return m.group(1)
+    # JS / Go: const / let / var / final
+    m = re.match(r'^(?:const|let|var|final)\s+([A-Za-z_]\w*)\s*=(?!=)', s)
+    if m:
+        return m.group(1)
+    # Generic  name = expr  (exclude == and !=)
+    m = re.match(r'^([A-Za-z_]\w*)\s*=(?![=>])', s)
+    if m:
+        return m.group(1)
+    return None
+
+
+def scan_taint(path: Path, language: str) -> list[Finding]:
+    """
+    Cross-line source-to-sink taint analysis for all supported languages.
+
+    Algorithm
+    ---------
+    Pass 1 — collect every assignment of the form  ``name = <source>``  and
+             record {var_name: [line_numbers]}.
+    Pass 2 — for each sink call, check whether any tainted variable appears as
+             an argument within WINDOW lines of the most recent source assignment.
+
+    This catches patterns like::
+
+        filename = request.args.get("f")   # source (line N)
+        open(filename)                      # sink   (line N+3)  ← flagged
+
+    which single-line regex rules cannot detect.
+    """
+    WINDOW = 25
+
+    sources = _TAINT_SOURCES.get(language, [])
+    sinks   = _TAINT_SINKS.get(language, [])
+    if not sources or not sinks:
+        return []
+
     try:
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        src = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return []
+    lines = src.splitlines()
+
+    # Pass 1: build taint map  {var_name: [line_numbers where tainted]}
+    tainted: dict[str, list[int]] = {}
+    for i, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        for pat in sources:
+            if re.search(pat, line, re.IGNORECASE):
+                var = _lhs_name(line, language)
+                if var:
+                    tainted.setdefault(var, []).append(i)
+
+    if not tainted:
+        return []
+
+    # Pass 2: match sinks and check for tainted-variable usage
+    findings: list[Finding] = []
+    reported: set[tuple[int, str]] = set()
 
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped:
             continue
-        for rule_id, severity, pattern, message in rules:
-            if re.search(pattern, line, re.IGNORECASE):
+        for rule_id, severity, sink_pat, message in sinks:
+            if not re.search(sink_pat, line, re.IGNORECASE):
+                continue
+            for var, src_lines in tainted.items():
+                if not re.search(r'\b' + re.escape(var) + r'\b', line):
+                    continue
+                nearby = [s for s in src_lines if 0 < i - s <= WINDOW]
+                if not nearby:
+                    continue
+                key = (i, rule_id)
+                if key in reported:
+                    continue
+                reported.add(key)
                 findings.append(Finding(
-                    file=str(path), line=i,
-                    severity=severity, rule_id=rule_id,
-                    language=language, message=message,
+                    file=str(path),
+                    line=i,
+                    severity=severity,
+                    rule_id=rule_id,
+                    language=language,
+                    message=f"{message} — tainted by user input on line {max(nearby)}",
                     code_snippet=stripped[:120],
                 ))
+
+    return findings
+
+
+# ── Rules where the string CONTENT is the vulnerability ──────────────────────
+#
+# For most rules, a match inside a Python string literal is a false positive
+# (documentation).  For these rules the *value* of the string IS the finding
+# (e.g. "../../../" as an actual path argument to open()).  The tokenizer-based
+# span filter is therefore bypassed for them; instead, lines whose stripped
+# content begins with a quote character (dictionary doc values) are skipped.
+
+_BYPASS_STRING_FILTER = frozenset({
+    "SEC027",  "SEC027B",   # deep directory traversal sequences
+    "SEC038",               # URL-encoded traversal (%2e%2e%2f …)
+    "SEC039",               # null byte in file-path context
+    "SEC037",               # sensitive system file references (/etc/passwd …)
+    "SEC042",               # /proc filesystem access
+})
+
+
+# ── Python AST intra-function taint analysis ─────────────────────────────────
+
+# Bare function names that return user-controlled data.
+_PY_SOURCE_CALLS = frozenset({
+    "input", "sys.argv",
+})
+
+# (rule_id, severity, sink-name-suffixes, human message)
+_PY_SINK_TABLE: list[tuple[str, str, frozenset[str], str]] = [
+    ("SEC004T", "HIGH",
+     frozenset({"execute", "executemany", "scalar", "query", "raw", "filter_by"}),
+     "SQL sink — user-controlled variable flows into database query"),
+    ("SEC002T", "HIGH",
+     frozenset({"system", "popen", "run", "call", "check_output", "check_call", "Popen", "exec"}),
+     "Command sink — user-controlled variable flows into shell execution"),
+    ("SEC035T", "HIGH",
+     frozenset({"open", "send_file", "send_from_directory", "read_text", "read_bytes"}),
+     "File-operation sink — user-controlled variable used as path"),
+    ("SEC026T", "HIGH",
+     frozenset({"render_template_string", "Template", "from_string"}),
+     "Template sink — user-controlled variable used as template source"),
+    ("SEC056T", "MEDIUM",
+     frozenset({"redirect", "HttpResponseRedirect", "HttpResponsePermanentRedirect"}),
+     "Redirect sink — user-controlled variable used as redirect URL"),
+]
+
+
+def _dotted_name(node: ast.expr) -> str:
+    """Return the dotted representation of a Name or Attribute chain."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _dotted_name(node.value) + "." + node.attr
+    return ""
+
+
+def _py_call_name(node: ast.Call) -> str:
+    """Return a dotted name for an AST Call node, e.g. ``cursor.execute``."""
+    return _dotted_name(node.func)
+
+
+def _is_py_source(node: ast.expr) -> bool:
+    """
+    Return True if the expression introduces user-controlled data.
+
+    Recognises:
+    * Any call on the ``request`` object: request.args.get(), request.form['x'], …
+    * Bare sources: input(), sys.argv
+    * Subscript/attribute chains rooted at request: request.args['id']
+    * Tuple/List whose elements are sources (for tuple-unpacking assignments)
+    """
+    if isinstance(node, ast.Call):
+        name = _py_call_name(node)
+        # Everything on flask/Django request is tainted: request.args.get(…),
+        # request.form.getlist(…), request.get_json(), etc.
+        if name.startswith("request."):
+            return True
+        if name in _PY_SOURCE_CALLS or any(name.endswith("." + s) for s in _PY_SOURCE_CALLS):
+            return True
+    if isinstance(node, ast.Attribute):
+        name = _dotted_name(node)
+        if name.startswith("request."):
+            return True
+    if isinstance(node, ast.Subscript):
+        return _is_py_source(node.value)
+    # Tuple/List: tainted if *any* element is tainted, e.g. ``a, b = src(), src()``
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return any(_is_py_source(e) for e in node.elts)
+    return False
+
+
+def _uses_tainted(node: ast.expr, tainted: set[str]) -> bool:
+    """Return True if the expression tree contains any tainted variable name."""
+    if isinstance(node, ast.Name):
+        return node.id in tainted
+    if isinstance(node, ast.BinOp):
+        return _uses_tainted(node.left, tainted) or _uses_tainted(node.right, tainted)
+    if isinstance(node, ast.JoinedStr):           # f-string
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and child.id in tainted:
+                return True
+        return False
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return any(_uses_tainted(e, tainted) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return any(_uses_tainted(v, tainted) for v in node.values if v)
+    if isinstance(node, ast.Call):
+        return any(_uses_tainted(a, tainted) for a in node.args) or any(
+            _uses_tainted(kw.value, tainted) for kw in node.keywords
+        )
+    if isinstance(node, ast.Subscript):
+        return _uses_tainted(node.value, tainted)
+    if isinstance(node, ast.IfExp):
+        return _uses_tainted(node.body, tainted) or _uses_tainted(node.orelse, tainted)
+    if isinstance(node, ast.Attribute):
+        return _uses_tainted(node.value, tainted)
+    if isinstance(node, ast.Starred):
+        return _uses_tainted(node.value, tainted)
+    return False
+
+
+def _propagate_taint(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """
+    Fixed-point taint propagation within a function body.
+
+    Repeatedly walks all assignments until the tainted-variable set stabilises.
+    This handles chains like::
+
+        x = request.args.get("q")
+        y = x.strip()
+        z = f"SELECT … {y}"
+        cursor.execute(z)        # ← z is tainted
+    """
+    tainted: set[str] = set()
+    while True:
+        prev = len(tainted)
+        for node in ast.walk(func):
+            rhs: ast.expr | None = None
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                rhs, targets = node.value, node.targets
+            elif isinstance(node, ast.AnnAssign) and node.value:
+                rhs, targets = node.value, [node.target]
+            elif isinstance(node, ast.NamedExpr):   # walrus :=
+                rhs, targets = node.value, [node.target]
+            if rhs is None:
+                continue
+            if _is_py_source(rhs) or _uses_tainted(rhs, tainted):
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        tainted.add(t.id)
+                    elif isinstance(t, (ast.Tuple, ast.List)):
+                        for elt in t.elts:
+                            if isinstance(elt, ast.Name):
+                                tainted.add(elt.id)
+        if len(tainted) == prev:
+            break   # fixed point reached
+    return tainted
+
+
+def scan_python_ast_taint(path: Path) -> list[Finding]:
+    """
+    Intra-function taint analysis for Python using the AST.
+
+    For each function/method in the file:
+      1. Compute the fixed-point taint set (variables that hold user-controlled data).
+      2. Walk every Call node; if any argument uses a tainted variable and the
+         callee is a known dangerous sink, emit a finding.
+
+    This catches multi-assignment taint chains that single-line regex cannot.
+    """
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        lines  = source.splitlines()
+        tree   = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    findings: list[Finding] = []
+    reported: set[tuple[int, str]] = set()
+
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+
+        tainted = _propagate_taint(func)
+        if not tainted:
+            continue
+
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            all_args = list(node.args) + [kw.value for kw in node.keywords]
+            if not any(_uses_tainted(a, tainted) for a in all_args):
+                continue
+
+            call_name = _py_call_name(node)
+            for rule_id, severity, sink_names, message in _PY_SINK_TABLE:
+                # Match by exact name or by the last component (method name)
+                last = call_name.rsplit(".", 1)[-1]
+                if call_name not in sink_names and last not in sink_names:
+                    continue
+                key = (node.lineno, rule_id)
+                if key in reported:
+                    continue
+                reported.add(key)
+                snippet = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+                findings.append(Finding(
+                    file=str(path),
+                    line=node.lineno,
+                    severity=severity,
+                    rule_id=rule_id,
+                    language="python",
+                    message=message + " (AST taint analysis)",
+                    code_snippet=snippet[:120],
+                ))
+
+    return findings
+
+
+def scan_with_regex(path: Path, language: str) -> list[Finding]:
+    findings: list[Finding] = []
+    rules = RULES.get(language, [])
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    lines = source.splitlines()
+
+    # Python: precompute string/comment byte-offset spans so that regex matches
+    # falling inside a string literal or comment are silently dropped.
+    nocode_spans: list[tuple[int, int]] = []
+    line_offsets: list[int] = []
+    if language == "python":
+        nocode_spans, line_offsets = _python_nocode_spans(source)
+
+    nosec_marker  = _NOSEC.get(language, "")
+    comment_pfxs  = _COMMENT_PREFIX.get(language, ())
+    in_block_cmt  = False
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # ── Block comment state ( /* … */ ) ──────────────────────────────────
+        if language in _BLOCK_COMMENT_LANGS:
+            if in_block_cmt:
+                if "*/" in stripped:
+                    in_block_cmt = False
+                continue                          # still inside block comment
+            if "/*" in stripped:
+                if "*/" not in stripped:
+                    in_block_cmt = True          # multi-line block comment starts
+                continue                          # skip the opening line too
+
+        # ── Skip full single-line comment lines ───────────────────────────────
+        if any(stripped.startswith(p) for p in comment_pfxs):
+            continue
+
+        # ── Inline nosec suppression ( # nosec / // nosec ) ──────────────────
+        if nosec_marker and nosec_marker in line.lower():
+            continue
+
+        # ── Per-rule matching ─────────────────────────────────────────────────
+        line_offset = line_offsets[i - 1] if line_offsets else 0
+
+        skip_for_lang = _RULE_SKIP.get(language, {})
+
+        for rule_id, severity, pattern, message in rules:
+            m = re.search(pattern, line, re.IGNORECASE)
+            if not m:
+                continue
+
+            # Python: false-positive suppression via tokenizer spans.
+            if nocode_spans:
+                if rule_id in _BYPASS_STRING_FILTER:
+                    # The string VALUE is the vulnerability (path, sequence …).
+                    # Only skip lines whose entire content is a documentation
+                    # string (e.g. a dict-value line starting with a quote).
+                    if stripped.startswith('"') or stripped.startswith("'"):
+                        continue
+                else:
+                    abs_start = line_offset + m.start()
+                    if any(s <= abs_start < e for s, e in nocode_spans):
+                        continue
+
+            # Context-aware skip (e.g. SEC027 in static ES import statements).
+            skip_pats = skip_for_lang.get(rule_id, ())
+            if any(re.search(sp, line) for sp in skip_pats):
+                continue
+
+            findings.append(Finding(
+                file=str(path), line=i,
+                severity=severity, rule_id=rule_id,
+                language=language, message=message,
+                code_snippet=stripped[:120],
+            ))
+
     return findings
 
 
@@ -564,18 +1158,38 @@ def scan_python_ast(path: Path) -> list[Finding]:
 
 
 def scan_file(path: Path) -> list[Finding]:
+    """
+    Run all scan engines for the given file and return deduplicated findings.
+
+    Engines (in order, each de-duplicated by (line, rule_id)):
+      1. scan_with_regex   — fast pattern matching with context filtering
+      2. scan_python_ast   — Python AST: assert-statement detection
+      3. scan_python_ast_taint — Python AST: intra-function source→sink taint
+      4. scan_taint        — cross-line sliding-window taint (all languages)
+    """
     language = EXTENSION_MAP.get(path.suffix.lower())
     if not language:
         language = FILENAME_MAP.get(path.name.lower())
     if not language:
         return []
 
-    findings = scan_with_regex(path, language)
+    seen: set[tuple[int, str]] = set()
+    findings: list[Finding] = []
+
+    def _merge(new: list[Finding]) -> None:
+        for f in new:
+            key = (f.line, f.rule_id)
+            if key not in seen:
+                seen.add(key)
+                findings.append(f)
+
+    _merge(scan_with_regex(path, language))
 
     if language == "python":
-        ast_findings = scan_python_ast(path)
-        existing_lines = {f.line for f in findings}
-        findings += [f for f in ast_findings if f.line not in existing_lines]
+        _merge(scan_python_ast(path))
+        _merge(scan_python_ast_taint(path))
+
+    _merge(scan_taint(path, language))
 
     return findings
 

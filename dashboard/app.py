@@ -7,6 +7,7 @@ Then open http://localhost:5000.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -14,14 +15,16 @@ import tempfile
 import zipfile
 from collections import Counter
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import (
-    Flask, abort, flash, redirect, render_template, request, url_for,
+    Flask, abort, flash, g, redirect, render_template, request, session, url_for,
 )
 
-from models import Finding, Report, make_session
+from models import Finding, Report, User, make_session
+from werkzeug.security import check_password_hash, generate_password_hash
 
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
@@ -34,8 +37,66 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 Session = make_session(str(DATA_DIR / "dashboard.db"))
 
 app = Flask(__name__)
-app.secret_key = "dev-only-not-used-for-auth"
+app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-in-production")
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
+
+
+# ─────────────────────────── auth ────────────────────────────────────────────
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not g.current_user:
+            return redirect(url_for("login_page", next=request.path))
+        return f(*args, **kwargs)
+    return decorated
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not g.current_user:
+            return redirect(url_for("login_page", next=request.path))
+        if g.current_user.role != "admin":
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.before_request
+def _load_user():
+    user_id = session.get("user_id")
+    g.current_user = None
+    if user_id:
+        with Session() as s:
+            u = s.query(User).filter_by(id=user_id).first()
+            if u:
+                s.expunge(u)
+            g.current_user = u
+
+
+@app.context_processor
+def _inject_user():
+    return {"current_user": g.get("current_user")}
+
+
+def _seed_admin() -> None:
+    username = os.environ.get("ADMIN_USERNAME", "admin")
+    password = os.environ.get("ADMIN_PASSWORD")
+    if not password:
+        return
+    with Session() as s:
+        if s.query(User).filter_by(username=username).first():
+            return
+        s.add(User(
+            username=username,
+            password_hash=generate_password_hash(password),
+            role="admin",
+        ))
+        s.commit()
+
+
+_seed_admin()
 
 
 # ─────────────────────────── helpers ─────────────────────────────────────────
@@ -655,7 +716,39 @@ def _findings_for(report_id: int, **filters) -> list[Finding]:
 
 # ─────────────────────────── routes ──────────────────────────────────────────
 
+@app.get("/login")
+def login_page():
+    if g.current_user:
+        return redirect(url_for("index"))
+    return render_template("login.html", next_url=request.args.get("next", ""), error=None)
+
+
+@app.post("/login")
+def login_post():
+    username = (request.form.get("username") or "").strip()
+    password = request.form.get("password") or ""
+    with Session() as s:
+        u = s.query(User).filter_by(username=username).first()
+        if u and check_password_hash(u.password_hash, password):
+            s.expunge(u)
+            session.clear()
+            session["user_id"] = u.id
+            next_url = request.form.get("next") or ""
+            if next_url.startswith("/") and not next_url.startswith("//"):
+                return redirect(next_url)
+            return redirect(url_for("index"))
+    next_url = request.form.get("next") or ""
+    return render_template("login.html", error="Invalid username or password.", next_url=next_url)
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login_page"))
+
+
 @app.get("/")
+@login_required
 def index():
     with Session() as s:
         recent = s.query(Report).order_by(Report.uploaded_at.desc()).limit(10).all()
@@ -665,6 +758,7 @@ def index():
 
 
 @app.post("/upload")
+@login_required
 def upload():
     f = request.files.get("file")
     if not f or not f.filename:
@@ -694,6 +788,7 @@ def upload():
 
 
 @app.post("/upload-url")
+@login_required
 def upload_url():
     raw_url = (request.form.get("repo_url") or "").strip()
     ref = (request.form.get("ref") or "").strip() or None
@@ -710,6 +805,7 @@ def upload_url():
 
 
 @app.get("/reports")
+@login_required
 def reports():
     with Session() as s:
         rows = s.query(Report).order_by(Report.uploaded_at.desc()).all()
@@ -719,6 +815,7 @@ def reports():
 
 
 @app.post("/reports/<int:report_id>/delete")
+@admin_required
 def delete_report(report_id: int):
     with Session() as s:
         r = s.get(Report, report_id)
@@ -734,6 +831,7 @@ def delete_report(report_id: int):
 
 
 @app.post("/report/<int:report_id>/rescan")
+@login_required
 def rescan(report_id: int):
     r = _get_report_or_404(report_id)
     # Chain rescans back to the original root, not to the previous rescan.
@@ -762,6 +860,7 @@ def rescan(report_id: int):
 
 
 @app.get("/report/<int:report_id>")
+@login_required
 def report(report_id: int):
     r = _get_report_or_404(report_id)
     findings = _findings_for(report_id)
@@ -802,6 +901,7 @@ def report(report_id: int):
 
 
 @app.get("/report/<int:report_id>/findings")
+@login_required
 def findings(report_id: int):
     r = _get_report_or_404(report_id)
     severity = request.args.get("severity") or ""
@@ -840,6 +940,7 @@ def findings(report_id: int):
 
 
 @app.get("/report/<int:report_id>/rule/<rule_id>")
+@login_required
 def rule(report_id: int, rule_id: str):
     r = _get_report_or_404(report_id)
     rows = _findings_for(report_id, rule_id=rule_id)

@@ -239,6 +239,151 @@ mv github_workflow .github
 └── requirements-dev.txt
 ```
 
+---
+
+## CI Build Webhook & Dashboard
+
+A Node.js service in `ci-webhook/` that receives build reports from any CI pipeline via a signed webhook and displays them in a live dashboard.
+
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `SESSION_SECRET` | ✓ | Random string used to sign session cookies — `openssl rand -hex 32` |
+| `ADMIN_USERNAME` | First run | Username for the seeded admin account |
+| `ADMIN_PASSWORD` | First run | Password for the seeded admin account |
+| `PORT` | | HTTP port (default `3000`) |
+| `DB_PATH` | | Path to SQLite database (default `./reports.db`) |
+
+### Quick start
+
+```bash
+cd ci-webhook
+npm install
+cp .env.example .env      # fill in SESSION_SECRET, ADMIN_USERNAME, ADMIN_PASSWORD
+npm start
+# open http://localhost:3000/login  →  sign in as admin
+# open http://localhost:3000/admin  →  copy your webhook secret
+```
+
+The first time the server starts it seeds the admin account from `ADMIN_USERNAME` / `ADMIN_PASSWORD` and prints the generated webhook secret to stdout.
+
+### How to create users and get webhook secrets
+
+1. Sign in at `/login` with the admin credentials.
+2. Go to `/admin` → click **Invite** to create a user. The temporary password is printed to the server log.
+3. The user's webhook secret is shown in the **Webhook Secret** column. Click **Copy** to copy it.
+4. Click **Regen secret** to rotate a user's secret (the old secret stops working immediately).
+
+### Wiring up the webhook
+
+The `X-Webhook-Secret` is a per-user 64-char hex token shown in the admin panel. Copy it and store it as a CI secret — it both authenticates the request and identifies the report owner.
+
+#### curl (manual test)
+
+```bash
+# Set YOUR_WEBHOOK_SECRET to the token from the admin panel
+curl -X POST http://localhost:3000/api/reports \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: $YOUR_WEBHOOK_SECRET" \
+  -d '{
+    "buildId":   "run-12345",
+    "branch":    "main",
+    "commit":    { "sha": "abc1234", "message": "chore: bump version", "author": "alice" },
+    "status":    "success",
+    "timestamp": "2024-04-30T12:00:00Z",
+    "duration":  47000,
+    "pipeline":  { "name": "GitHub Actions", "url": "https://github.com/org/repo/actions/runs/12345" },
+    "testResults": { "passed": 42, "failed": 0, "skipped": 3 }
+  }'
+```
+
+#### GitHub Actions
+
+Store the webhook secret from the admin panel as `CI_WEBHOOK_SECRET` (Settings → Secrets and variables → Actions), and the server URL as `CI_WEBHOOK_URL`.
+
+```yaml
+- name: Send build report
+  if: always()
+  env:
+    CI_WEBHOOK_SECRET: ${{ secrets.CI_WEBHOOK_SECRET }}
+    CI_WEBHOOK_URL:    ${{ secrets.CI_WEBHOOK_URL }}
+  run: |
+    STATUS="success"
+    if [ "${{ job.status }}" != "success" ]; then STATUS="failure"; fi
+    curl -sf -X POST "$CI_WEBHOOK_URL/api/reports" \
+      -H "Content-Type: application/json" \
+      -H "X-Webhook-Secret: $CI_WEBHOOK_SECRET" \
+      -d "{
+        \"buildId\":   \"${{ github.run_id }}-${{ github.run_attempt }}\",
+        \"branch\":    \"${{ github.ref_name }}\",
+        \"commit\":    { \"sha\": \"${{ github.sha }}\", \"message\": $(echo '${{ github.event.head_commit.message }}' | jq -Rs .), \"author\": \"${{ github.actor }}\" },
+        \"status\":    \"$STATUS\",
+        \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+        \"pipeline\":  { \"name\": \"${{ github.workflow }}\", \"url\": \"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\" }
+      }"
+```
+
+#### GitLab CI
+
+Set `CI_WEBHOOK_SECRET` and `CI_WEBHOOK_URL` in **Settings → CI/CD → Variables**.
+
+```yaml
+send_build_report:
+  stage: .post
+  when: always
+  script:
+    - |
+      STATUS="success"
+      if [ "$CI_JOB_STATUS" != "success" ]; then STATUS="failure"; fi
+      curl -sf -X POST "$CI_WEBHOOK_URL/api/reports" \
+        -H "Content-Type: application/json" \
+        -H "X-Webhook-Secret: $CI_WEBHOOK_SECRET" \
+        -d "{
+          \"buildId\":   \"$CI_PIPELINE_ID-$CI_JOB_ID\",
+          \"branch\":    \"$CI_COMMIT_BRANCH\",
+          \"commit\":    { \"sha\": \"$CI_COMMIT_SHA\", \"message\": $(echo \"$CI_COMMIT_MESSAGE\" | jq -Rs .), \"author\": \"$GITLAB_USER_LOGIN\" },
+          \"status\":    \"$STATUS\",
+          \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+          \"pipeline\":  { \"name\": \"$CI_PIPELINE_NAME\", \"url\": \"$CI_PIPELINE_URL\" }
+        }"
+```
+
+### JSON payload reference
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `buildId` | string | ✓ | Unique identifier for this run (must be unique across all reports) |
+| `branch` | string | ✓ | Git branch name |
+| `commit.sha` | string | ✓ | Full or short commit SHA |
+| `commit.author` | string | ✓ | Author login or name |
+| `commit.message` | string | | Commit message |
+| `status` | string | ✓ | `success`, `failure`, or `cancelled` |
+| `timestamp` | string | ✓ | ISO-8601 build start time |
+| `duration` | number | | Build duration in milliseconds |
+| `pipeline.name` | string | | CI pipeline / workflow name |
+| `pipeline.url` | string | | Link to the pipeline run |
+| `testResults.passed` | number | | Passing test count |
+| `testResults.failed` | number | | Failing test count |
+| `testResults.skipped` | number | | Skipped test count |
+| `artifacts` | array | | Arbitrary artifact metadata |
+| `metadata` | object | | Any additional CI-specific fields |
+
+### API endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/reports` | `X-Webhook-Secret` (per-user) | Ingest a build report |
+| `GET` | `/api/reports` | Session | List reports — `?page=1&limit=20&branch=main&status=success` |
+| `GET` | `/api/reports/:buildId` | Session | Fetch a single report |
+| `GET` | `/api/health` | None | Uptime and report count |
+| `GET` | `/dashboard` | Session | Live HTML dashboard |
+| `GET` | `/admin` | Session (admin role) | User management panel |
+
+Members see only their own reports. Admins see everything.
+
+---
+
 ## False Positive Mitigation
 
 The rules are designed to minimize noise:

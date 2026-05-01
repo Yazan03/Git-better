@@ -31,6 +31,12 @@
     </nav>
     <span class="spacer"></span>
     {% block topbar_right %}{% endblock %}
+    {% if current_user %}
+    <span class="topbar-user">{{ current_user.username }}</span>
+    <form method="POST" action="{{ url_for('logout') }}" style="display:inline">
+      <button type="submit" class="btn btn-sm">Sign out</button>
+    </form>
+    {% endif %}
     <button class="theme-toggle" type="button" id="themeToggle"
             aria-label="Toggle color theme" title="Toggle theme">
       <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"

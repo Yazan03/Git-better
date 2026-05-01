@@ -191,7 +191,7 @@ RULES = {
     ],
 
     "javascript": [
-        ("SEC001", "HIGH",   r'\b(password|api_?key|secret|token|access_?token|auth_?token)\s*[=:]\s*["\'][^"\']{4,}["\']',
+        ("SEC001", "HIGH",   r'(?<!\.)(?<!["\'])\b(password|api_?key|secret|token|access_?token|auth_?token)\s*[=:]\s*["\'][^"\']{4,}["\']',
                              "Hardcoded secret"),
         ("SEC002", "HIGH",   r'\beval\s*\(',                  "Use of eval()"),
         ("SEC006", "HIGH",   r'innerHTML\s*=',                "XSS risk via innerHTML assignment"),
@@ -597,8 +597,9 @@ _RULE_SKIP: dict[str, dict[str, list[str]]] = {
             r"""^\s*(?:import\b|export\b[^"']*\bfrom\b)\s.*?["'](\.\.\/){2,}[^"'$`{}+]*["']""",
             # ES6 dynamic import with literal only: import('../../..')
             r"""^\s*(?:const|let|var)\s+[\w{}\s,*]+\s*=\s*(?:await\s+)?import\s*\(\s*["'](\.\.\/){2,}[^"'$`{}+]*["']\s*\)""",
-            # CommonJS: require('../../..')
+            # CommonJS: require('../../..')  — full or destructured (multiline tail: } = require(...))
             r"""^\s*(?:(?:const|let|var)\s+[\w{}\s,*]+\s*=\s*)?require\s*\(\s*["'](\.\.\/){2,}[^"'$`{}+]*["']\s*\)""",
+            r"""^\s*\}\s*=\s*require\s*\(\s*["'](\.\.\/){2,}[^"'$`{}+]*["']\s*\)""",
         ],
     },
 }

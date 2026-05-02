@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin — CI Dashboard</title>
+  <style>
+    :root {
+      --bg:           #0d1117;
+      --surface:      #161b22;
+      --surface2:     #1c2129;
+      --border:       #30363d;
+      --text:         #e6edf3;
+      --text-muted:   #7d8590;
+      --text-subtle:  #484f58;
+      --accent:       #388bfd;
+      --success:      #3fb950;
+      --failure:      #f85149;
+      --cancelled:    #d29922;
+      --radius:       8px;
+      --font:         -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono:         "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    [data-theme="light"] {
+      --bg:         #f6f8fa;
+      --surface:    #ffffff;
+      --surface2:   #f6f8fa;
+      --border:     #d0d7de;
+      --text:       #1f2328;
+      --text-muted: #57606a;
+      --text-subtle:#6e7781;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; min-height: 100vh; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .page { max-width: 1100px; margin: 0 auto; padding: 0 24px 64px; }
+
+    /* ── header ─────────────────────────────────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 0 24px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 32px;
+      gap: 12px;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .header-title { font-size: 20px; font-weight: 600; }
+    .header-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .user-chip { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); }
+    .role-badge {
+      font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 10px;
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    .role-badge.admin  { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+    .role-badge.member { background: color-mix(in srgb, var(--text-muted) 15%, transparent); color: var(--text-muted); }
+    .btn {
+      background: var(--surface); border: 1px solid var(--border); color: var(--text-muted);
+      border-radius: var(--radius); padding: 6px 12px; cursor: pointer; font-size: 13px;
+      text-decoration: none; white-space: nowrap; display: inline-block; line-height: 1.4;
+    }
+    .btn:hover { background: var(--surface2); color: var(--text); text-decoration: none; }
+    .btn-sm { padding: 3px 9px; font-size: 12px; }
+    .btn-danger { border-color: color-mix(in srgb, var(--failure) 40%, transparent); color: var(--failure); }
+    .btn-danger:hover { background: color-mix(in srgb, var(--failure) 10%, transparent); color: var(--failure); }
+
+    /* ── flash banners ──────────────────────────────────────────────────── */
+    .flash {
+      border-radius: var(--radius);
+      padding: 10px 16px;
+      font-size: 13px;
+      margin-bottom: 24px;
+    }
+    .flash.success { background: color-mix(in srgb, var(--success) 12%, transparent); border: 1px solid color-mix(in srgb, var(--success) 30%, transparent); color: var(--success); }
+    .flash.error   { background: color-mix(in srgb, var(--failure) 12%, transparent); border: 1px solid color-mix(in srgb, var(--failure) 30%, transparent); color: var(--failure); }
+
+    /* ── section headings ───────────────────────────────────────────────── */
+    .section-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .section-head h2 { font-size: 16px; font-weight: 600; }
+
+    /* ── invite form ────────────────────────────────────────────────────── */
+    .invite-form {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      margin-bottom: 32px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: flex-end;
+    }
+    .invite-form h2 { width: 100%; font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+    .field input {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      border-radius: var(--radius); padding: 7px 10px; font-size: 13px; outline: none; width: 200px;
+    }
+    .field input:focus { border-color: var(--accent); }
+    .invite-btn {
+      background: var(--accent); border: none; color: #fff; border-radius: var(--radius);
+      padding: 8px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    .invite-btn:hover { opacity: .88; }
+
+    /* ── user table ─────────────────────────────────────────────────────── */
+    .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { background: var(--surface2); border-bottom: 1px solid var(--border); }
+    th {
+      text-align: left; font-size: 12px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .05em; color: var(--text-muted); padding: 10px 16px; white-space: nowrap;
+    }
+    td { padding: 11px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: var(--surface2); }
+
+    .secret-cell { display: flex; align-items: center; gap: 6px; }
+    .secret-mono { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+    .actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <header class="header">
+    <div class="header-left">
+      <span class="header-title">CI Build Dashboard</span>
+      <span style="font-size:13px;color:var(--text-muted)">/ Admin</span>
+    </div>
+    <div class="header-right" id="header-right"></div>
+  </header>
+
+  <div id="flash-area"></div>
+
+  <!-- invite form -->
+  <div class="invite-form">
+    <h2>Invite new user</h2>
+    <form method="POST" action="/admin/invite" style="display:contents">
+      <div class="field">
+        <label>Username <span style="color:var(--failure)">*</span></label>
+        <input name="username" type="text" required placeholder="jdoe" />
+      </div>
+      <div class="field">
+        <label>Email <span style="color:var(--text-subtle)">(optional)</span></label>
+        <input name="email" type="email" placeholder="jdoe@example.com" />
+      </div>
+      <button class="invite-btn" type="submit">Invite</button>
+    </form>
+  </div>
+
+  <!-- user table -->
+  <div class="section-head">
+    <h2>Users</h2>
+    <span style="font-size:13px;color:var(--text-muted)" id="user-count"></span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Email</th>
+          <th>Role</th>
+          <th>Reports</th>
+          <th>Last Active</th>
+          <th>Webhook Secret</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+  /*DATA_PLACEHOLDER*/
+
+  // ── helpers ──────────────────────────────────────────────────────────────
+
+  function esc(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function timeAgo(isoStr) {
+    if (!isoStr) return 'never';
+    const diff = Date.now() - new Date(isoStr).getTime();
+    const s = Math.floor(diff / 1000);
+    if (s < 60)  return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60)  return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24)  return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  }
+
+  // ── nav ───────────────────────────────────────────────────────────────────
+
+  (function renderNav() {
+    const { username, role } = ADMIN_DATA.currentUser;
+    document.getElementById('header-right').innerHTML = `
+      <span class="user-chip">
+        ${esc(username)}<span class="role-badge ${esc(role)}">${esc(role)}</span>
+      </span>
+      <a class="btn" href="/dashboard">Dashboard</a>
+      <form method="POST" action="/logout" style="display:inline">
+        <button class="btn" type="submit">Sign out</button>
+      </form>
+      <button class="btn" id="theme-btn">Toggle theme</button>
+    `;
+    document.getElementById('theme-btn').addEventListener('click', () => {
+      const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('ci-dash-theme', next);
+    });
+  })();
+
+  // ── flash messages ────────────────────────────────────────────────────────
+
+  (function renderFlash() {
+    const { invited, error } = ADMIN_DATA.flash;
+    const area = document.getElementById('flash-area');
+    const ERRORS = {
+      'username-required':   'Username is required.',
+      'duplicate-username':  'That username is already taken.',
+      'user-not-found':      'User not found.',
+      'cannot-delete-self':  'You cannot delete your own account.',
+      'cannot-change-own-role': 'You cannot change your own role.',
+    };
+    if (invited) {
+      area.innerHTML = `<div class="flash success">User <strong>${esc(invited)}</strong> was invited. Check the server logs for their temporary password.</div>`;
+    } else if (error && ERRORS[error]) {
+      area.innerHTML = `<div class="flash error">${ERRORS[error]}</div>`;
+    }
+  })();
+
+  // ── user table ────────────────────────────────────────────────────────────
+
+  (function renderUsers() {
+    const { users, currentUser } = ADMIN_DATA;
+    document.getElementById('user-count').textContent = `${users.length} user${users.length !== 1 ? 's' : ''}`;
+
+    const tbody = document.getElementById('tbody');
+    tbody.innerHTML = users.map(u => {
+      const isSelf   = u.id === currentUser.id;
+      const roleLabel = u.role === 'admin' ? 'Admin' : 'Member';
+      const roleBtnLabel = u.role === 'admin' ? 'Demote' : 'Promote';
+      const secretShort = u.webhook_secret.slice(0, 20) + '…';
+
+      const actionsHtml = `
+        <div class="actions-cell">
+          ${!isSelf ? `
+            <form method="POST" action="/admin/users/${u.id}/role" style="display:contents">
+              <button class="btn btn-sm" type="submit" title="${roleBtnLabel} to ${u.role === 'admin' ? 'member' : 'admin'}">${roleBtnLabel}</button>
+            </form>
+            <form method="POST" action="/admin/users/${u.id}/delete" style="display:contents"
+                  onsubmit="return confirm('Delete ${esc(u.username)} and reassign their reports to you?')">
+              <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+            </form>
+          ` : '<span style="color:var(--text-subtle);font-size:12px">(you)</span>'}
+          <form method="POST" action="/admin/users/${u.id}/regenerate-secret" style="display:contents"
+                onsubmit="return confirm('Regenerate webhook secret for ${esc(u.username)}? Their CI pipelines will need updating.')">
+            <button class="btn btn-sm" type="submit">Regen secret</button>
+          </form>
+          <button class="btn btn-sm" onclick="copySecret('${esc(u.webhook_secret)}')" title="Copy full secret">Copy</button>
+        </div>
+      `;
+
+      return `<tr>
+        <td><strong>${esc(u.username)}</strong>${isSelf ? ' <span style="color:var(--text-subtle);font-size:11px">(you)</span>' : ''}</td>
+        <td style="color:var(--text-muted)">${esc(u.email || '—')}</td>
+        <td><span class="role-badge ${esc(u.role)}">${roleLabel}</span></td>
+        <td>${u.report_count}</td>
+        <td style="color:var(--text-muted)" title="${esc(u.last_active || '')}">${timeAgo(u.last_active)}</td>
+        <td>
+          <div class="secret-cell">
+            <span class="secret-mono" title="${esc(u.webhook_secret)}">${esc(secretShort)}</span>
+          </div>
+        </td>
+        <td>${actionsHtml}</td>
+      </tr>`;
+    }).join('');
+  })();
+
+  // ── clipboard helper ──────────────────────────────────────────────────────
+
+  function copySecret(secret) {
+    navigator.clipboard?.writeText(secret).then(() => {
+      alert('Webhook secret copied to clipboard.');
+    }).catch(() => {
+      prompt('Copy this webhook secret:', secret);
+    });
+  }
+
+  // ── theme init ────────────────────────────────────────────────────────────
+
+  const saved = localStorage.getItem('ci-dash-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+</script>
+</body>
+</html>

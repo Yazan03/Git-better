@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign up — Scanner</title>
+  <title>Sign up — Git Better</title>
   <script>
     (function () {
       try {
@@ -14,99 +14,402 @@
   </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
   <style>
-    .login-wrap {
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
       min-height: 100vh;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    /* ── Left panel ── */
+    .auth-hero {
+      background: linear-gradient(145deg, #0f172a 0%, #1e293b 50%, #0f2044 100%);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 48px 52px;
+      position: relative;
+      overflow: hidden;
+    }
+    .auth-hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 20% 20%, rgba(99,102,241,.18) 0%, transparent 55%),
+        radial-gradient(circle at 80% 80%, rgba(37,99,235,.15) 0%, transparent 55%);
+    }
+    .hero-brand {
       display: flex;
       align-items: center;
-      justify-content: center;
+      gap: 12px;
+      position: relative;
+      z-index: 1;
     }
-    .login-card {
-      width: 100%;
-      max-width: 360px;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 36px 32px;
+    .hero-brand-icon {
+      width: 40px; height: 40px;
+      background: linear-gradient(135deg, #6366f1, #2563eb);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 4px 16px rgba(99,102,241,.4);
     }
-    .login-logo {
+    .hero-brand-name {
+      font-size: 18px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -.01em;
+    }
+    .hero-brand-name span { color: #818cf8; }
+
+    .hero-body { position: relative; z-index: 1; }
+    .hero-body h2 {
+      font-size: 32px;
+      font-weight: 700;
+      color: #fff;
+      line-height: 1.2;
+      letter-spacing: -.02em;
+      margin-bottom: 16px;
+    }
+    .hero-body p {
+      font-size: 15px;
+      color: #94a3b8;
+      line-height: 1.6;
+      max-width: 340px;
+    }
+    .hero-features {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      position: relative;
+      z-index: 1;
+    }
+    .hero-feat {
       display: flex;
       align-items: center;
       gap: 10px;
-      margin-bottom: 28px;
-      font-size: 16px;
-      font-weight: 600;
+      font-size: 13px;
+      color: #94a3b8;
     }
-    .login-logo .dot {
-      width: 10px;
-      height: 10px;
+    .hero-feat-dot {
+      width: 6px; height: 6px;
       border-radius: 50%;
-      background: var(--accent);
+      background: #6366f1;
+      flex-shrink: 0;
     }
-    .login-card h1 { font-size: 18px; margin-bottom: 24px; }
-    .login-error {
+
+    /* ── Right panel (form) ── */
+    .auth-form-panel {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 40px;
+    }
+    .auth-card {
+      width: 100%;
+      max-width: 400px;
+    }
+    .auth-card-header { margin-bottom: 28px; }
+    .auth-card-header h1 {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -.02em;
+      margin-bottom: 6px;
+    }
+    .auth-card-header p {
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .auth-error {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
       background: var(--high-bg);
       border: 1px solid var(--high-border);
       color: var(--high-fg);
-      padding: 9px 12px;
-      border-radius: var(--radius-sm);
+      padding: 11px 14px;
+      border-radius: 8px;
       font-size: 13px;
-      margin-bottom: 18px;
+      margin-bottom: 20px;
+      line-height: 1.4;
     }
-    .login-field { margin-bottom: 14px; }
-    .login-field label {
+    .auth-error svg { flex-shrink: 0; margin-top: 1px; }
+
+    .auth-field { margin-bottom: 14px; }
+    .auth-field label {
       display: block;
-      font-size: 12px;
+      font-size: 13px;
       font-weight: 500;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: .05em;
-      margin-bottom: 5px;
+      margin-bottom: 6px;
     }
-    .login-field input { width: 100%; font-size: 14px; }
-    .login-submit { width: 100%; margin-top: 8px; justify-content: center; }
-    .login-footer {
-      margin-top: 18px;
+    .auth-input-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .auth-input-icon {
+      position: absolute;
+      left: 12px;
+      color: var(--muted);
+      display: flex;
+      pointer-events: none;
+    }
+    .auth-input-wrap input {
+      width: 100%;
+      padding: 10px 12px 10px 38px;
+      font-size: 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      transition: border-color .15s, box-shadow .15s;
+      outline: none;
+    }
+    .auth-input-wrap input:focus {
+      border-color: #6366f1;
+      box-shadow: 0 0 0 3px rgba(99,102,241,.12);
+    }
+    .auth-input-wrap input::placeholder { color: var(--muted-2); }
+
+    .pw-toggle {
+      position: absolute;
+      right: 10px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--muted);
+      display: flex;
+      padding: 4px;
+      border-radius: 4px;
+      transition: color .12s;
+    }
+    .pw-toggle:hover { color: var(--text); }
+
+    /* password strength bar */
+    .pw-strength { margin-top: 6px; }
+    .pw-strength-bar {
+      height: 3px;
+      border-radius: 2px;
+      background: var(--border);
+      overflow: hidden;
+    }
+    .pw-strength-fill {
+      height: 100%;
+      border-radius: 2px;
+      width: 0%;
+      transition: width .25s, background .25s;
+    }
+    .pw-strength-label {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .auth-submit {
+      width: 100%;
+      margin-top: 10px;
+      padding: 11px;
+      font-size: 14px;
+      font-weight: 600;
+      border: none;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #6366f1, #2563eb);
+      color: #fff;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+      letter-spacing: .01em;
+    }
+    .auth-submit:hover { opacity: .92; }
+    .auth-submit:active { transform: scale(.99); }
+
+    .auth-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 22px 0;
+    }
+    .auth-footer {
+      text-align: center;
       font-size: 13px;
       color: var(--muted);
-      text-align: center;
     }
-    .login-footer a { color: var(--accent); text-decoration: none; }
-    .login-footer a:hover { text-decoration: underline; }
+    .auth-footer a {
+      color: #6366f1;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .auth-footer a:hover { text-decoration: underline; }
+
+    /* match indicator on confirm field */
+    .auth-input-wrap input.match-ok { border-color: #16a34a; }
+    .auth-input-wrap input.match-ok:focus { box-shadow: 0 0 0 3px rgba(22,163,74,.12); }
+    .auth-input-wrap input.match-bad { border-color: var(--high-border); }
+
+    @media (max-width: 700px) {
+      body { grid-template-columns: 1fr; }
+      .auth-hero { display: none; }
+      .auth-form-panel { padding: 32px 24px; }
+    }
   </style>
 </head>
 <body>
-<div class="login-wrap">
-  <div class="login-card">
-    <div class="login-logo">
-      <span class="dot"></span>
-      <span>Scanner</span>
+
+<!-- Left: branding panel -->
+<div class="auth-hero">
+  <div class="hero-brand">
+    <div class="hero-brand-icon">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        <path d="M9 12l2 2 4-4"/>
+      </svg>
     </div>
-    <h1>Create account</h1>
+    <div class="hero-brand-name">Git <span>Better</span></div>
+  </div>
+
+  <div class="hero-body">
+    <h2>Start scanning<br>in seconds</h2>
+    <p>Create your account and start identifying vulnerabilities across your codebase today. Free to use, no credit card required.</p>
+  </div>
+
+  <div class="hero-features">
+    <div class="hero-feat"><span class="hero-feat-dot"></span>Upload a ZIP or paste a GitHub URL</div>
+    <div class="hero-feat"><span class="hero-feat-dot"></span>Scan results in under 30 seconds</div>
+    <div class="hero-feat"><span class="hero-feat-dot"></span>SARIF export for CI/CD integration</div>
+    <div class="hero-feat"><span class="hero-feat-dot"></span>Rescan to track improvements over time</div>
+  </div>
+</div>
+
+<!-- Right: form panel -->
+<div class="auth-form-panel">
+  <div class="auth-card">
+    <div class="auth-card-header">
+      <h1>Create account</h1>
+      <p>Get started with Git Better for free</p>
+    </div>
+
     {% if error %}
-    <div class="login-error">{{ error }}</div>
+    <div class="auth-error">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {{ error }}
+    </div>
     {% endif %}
+
     <form method="POST" action="{{ url_for('signup_post') }}">
-      <div class="login-field">
+
+      <div class="auth-field">
         <label for="username">Username</label>
-        <input id="username" name="username" type="text"
-               autocomplete="username" autofocus required minlength="3">
+        <div class="auth-input-wrap">
+          <span class="auth-input-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+            </svg>
+          </span>
+          <input id="username" name="username" type="text"
+                 placeholder="choose a username"
+                 autocomplete="username" autofocus required minlength="3">
+        </div>
       </div>
-      <div class="login-field">
+
+      <div class="auth-field">
         <label for="password">Password</label>
-        <input id="password" name="password" type="password"
-               autocomplete="new-password" required minlength="6">
+        <div class="auth-input-wrap">
+          <span class="auth-input-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+          </span>
+          <input id="password" name="password" type="password"
+                 placeholder="min 6 characters"
+                 autocomplete="new-password" required minlength="6"
+                 oninput="checkStrength(this.value)">
+          <button type="button" class="pw-toggle" onclick="togglePw('password', this)" aria-label="Show password">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+        <div class="pw-strength">
+          <div class="pw-strength-bar"><div class="pw-strength-fill" id="pw-fill"></div></div>
+          <div class="pw-strength-label" id="pw-label"></div>
+        </div>
       </div>
-      <div class="login-field">
+
+      <div class="auth-field">
         <label for="confirm">Confirm password</label>
-        <input id="confirm" name="confirm" type="password"
-               autocomplete="new-password" required minlength="6">
+        <div class="auth-input-wrap">
+          <span class="auth-input-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          </span>
+          <input id="confirm" name="confirm" type="password"
+                 placeholder="repeat your password"
+                 autocomplete="new-password" required minlength="6"
+                 oninput="checkMatch()">
+          <button type="button" class="pw-toggle" onclick="togglePw('confirm', this)" aria-label="Show password">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
       </div>
-      <button type="submit" class="btn btn-primary login-submit">Create account</button>
+
+      <button type="submit" class="auth-submit">Create account</button>
     </form>
-    <div class="login-footer">
+
+    <div class="auth-divider"></div>
+    <div class="auth-footer">
       Already have an account? <a href="{{ url_for('login_page') }}">Sign in</a>
     </div>
   </div>
 </div>
+
+<script>
+  function togglePw(id, btn) {
+    const inp = document.getElementById(id);
+    const showing = inp.type === 'text';
+    inp.type = showing ? 'password' : 'text';
+    btn.innerHTML = showing
+      ? '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+      : '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+  }
+
+  function checkStrength(val) {
+    const fill  = document.getElementById('pw-fill');
+    const label = document.getElementById('pw-label');
+    if (!val) { fill.style.width = '0%'; label.textContent = ''; return; }
+    let score = 0;
+    if (val.length >= 8)  score++;
+    if (val.length >= 12) score++;
+    if (/[A-Z]/.test(val)) score++;
+    if (/[0-9]/.test(val)) score++;
+    if (/[^A-Za-z0-9]/.test(val)) score++;
+    const levels = [
+      { w: '20%', c: '#ef4444', t: 'Weak' },
+      { w: '40%', c: '#f97316', t: 'Fair' },
+      { w: '60%', c: '#eab308', t: 'Good' },
+      { w: '80%', c: '#84cc16', t: 'Strong' },
+      { w: '100%',c: '#22c55e', t: 'Very strong' },
+    ];
+    const l = levels[Math.min(score, 4)];
+    fill.style.width = l.w;
+    fill.style.background = l.c;
+    label.textContent = l.t;
+    label.style.color = l.c;
+  }
+
+  function checkMatch() {
+    const pw  = document.getElementById('password').value;
+    const cfm = document.getElementById('confirm');
+    if (!cfm.value) { cfm.classList.remove('match-ok','match-bad'); return; }
+    cfm.classList.toggle('match-ok',  cfm.value === pw);
+    cfm.classList.toggle('match-bad', cfm.value !== pw);
+  }
+</script>
 </body>
 </html>

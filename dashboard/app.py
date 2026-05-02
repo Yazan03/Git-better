@@ -549,6 +549,8 @@ def _ingest_report(
                 language=f.get("language", ""),
                 message=f.get("message", ""),
                 code_snippet=f.get("code_snippet", ""),
+                confidence=f.get("confidence", "LOW"),
+                ai_explanation=f.get("ai_explanation", ""),
             )
             for f in findings
         ])
@@ -855,18 +857,20 @@ def reports():
 
 
 @app.post("/reports/<int:report_id>/delete")
-@admin_required
+@login_required
 def delete_report(report_id: int):
     with Session() as s:
         r = s.get(Report, report_id)
-        if r is not None:
-            zip_name = r.zip_filename
-            s.delete(r)
-            s.commit()
-            if zip_name:
-                stored = UPLOAD_DIR / zip_name
-                if stored.exists():
-                    stored.unlink()
+        if r is None:
+            abort(404)
+        zip_name = r.zip_filename
+        s.delete(r)
+        s.commit()
+        if zip_name:
+            stored = UPLOAD_DIR / zip_name
+            if stored.exists():
+                stored.unlink()
+    flash("Report deleted.")
     return redirect(url_for("reports"))
 
 
@@ -988,6 +992,61 @@ def rule(report_id: int, rule_id: str):
     if not rows:
         abort(404)
     return render_template("rule.html", r=r, rule_id=rule_id, rows=rows)
+
+
+@app.post("/report/<int:report_id>/finding/<int:finding_id>/explain")
+@login_required
+def explain_finding(report_id: int, finding_id: int):
+    """Call the Anthropic API to generate an AI triage note for one finding."""
+    import os
+    from flask import jsonify
+
+    _get_report_or_404(report_id)  # 404 if report doesn't exist
+
+    with Session() as s:
+        f = s.get(Finding, finding_id)
+        if f is None or f.report_id != report_id:
+            abort(404)
+
+        # Return cached explanation if already generated
+        if f.ai_explanation:
+            return jsonify({"explanation": f.ai_explanation})
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return jsonify({"error": "ANTHROPIC_API_KEY is not set on the server."}), 503
+
+        try:
+            import anthropic  # type: ignore[import]
+            client = anthropic.Anthropic(api_key=api_key)
+            prompt = (
+                "You are a security expert reviewing a SAST tool finding. Be concise.\n\n"
+                f"Rule    : {f.rule_id} | Severity: {f.severity}\n"
+                f"Language: {f.language}\n"
+                f"File    : {f.file} line {f.line}\n"
+                f"Message : {f.message}\n"
+                f"Snippet : {f.code_snippet}\n\n"
+                "In 2-3 sentences answer: "
+                "(1) Is this likely a true positive or false positive? "
+                "(2) What is the real exploitability risk? "
+                "(3) What is the recommended fix?"
+            )
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            explanation = resp.content[0].text.strip()
+        except ImportError:
+            return jsonify({"error": "anthropic package not installed on server."}), 503
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+        # Persist for future requests
+        f.ai_explanation = explanation
+        s.commit()
+
+    return jsonify({"explanation": explanation})
 
 
 # ─────────────────────────── filters ─────────────────────────────────────────

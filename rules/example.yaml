@@ -1,0 +1,50 @@
+# Custom rule file for the Git Better vulnerability scanner.
+#
+# Usage:
+#   python scripts/vuln_scanner.py --path ./src --rules rules/example.yaml
+#
+# Schema reference:
+#   id        : unique rule identifier (e.g. CUSTOM001)
+#   language  : python | javascript | php | java | go | bash | c | dockerfile | gha | build
+#   severity  : HIGH | MEDIUM | LOW
+#   pattern   : Python re (re.IGNORECASE is applied automatically)
+#   message   : human-readable description shown in the report
+#   cwe       : CWE reference, e.g. "CWE-89"   (optional)
+#   owasp     : OWASP Top-10 ref, e.g. "A03:2021"  (optional)
+
+rules:
+  # Example 1 — detect Flask routes that disable CSRF globally
+  - id: CUSTOM001
+    language: python
+    severity: HIGH
+    pattern: '@app\.route.*methods=\[.*POST.*\](?!.*csrf)'
+    message: "Flask POST route — ensure CSRF protection is enabled (Flask-WTF or manual token)"
+    cwe: "CWE-352"
+    owasp: "A01:2021"
+
+  # Example 2 — detect raw SQL strings in JavaScript (common with template literals)
+  - id: CUSTOM002
+    language: javascript
+    severity: HIGH
+    pattern: '`\s*(?:SELECT|INSERT|UPDATE|DELETE|DROP|TRUNCATE)\s+.*\$\{'
+    message: "Raw SQL query built with template literal — use parameterised queries"
+    cwe: "CWE-89"
+    owasp: "A03:2021"
+
+  # Example 3 — hardcoded database connection strings
+  - id: CUSTOM003
+    language: python
+    severity: HIGH
+    pattern: '(?i)(?:mysql|postgresql|postgres|mongodb|redis)://[^@\s]{4,}@'
+    message: "Database connection string with embedded credentials — use environment variables"
+    cwe: "CWE-798"
+    owasp: "A07:2021"
+
+  # Example 4 — detect TODO/FIXME security notes that were never addressed
+  - id: CUSTOM004
+    language: python
+    severity: LOW
+    pattern: '(?i)#\s*(?:todo|fixme|hack|xxx)\s*:.*(?:auth|security|vuln|inject|xss|sqli|csrf)'
+    message: "Unresolved security TODO/FIXME — review and address before shipping"
+    cwe: ""
+    owasp: ""

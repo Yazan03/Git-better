@@ -58,7 +58,8 @@
       <tr>
         <th style="width: 90px;">Severity</th>
         <th style="width: 90px;">Rule</th>
-        <th style="width: 90px;">Lang</th>
+        <th style="width: 80px;">Lang</th>
+        <th style="width: 80px;">Confidence</th>
         <th>Location</th>
         <th>Message</th>
       </tr>
@@ -67,15 +68,20 @@
       {% for f in rows %}
       <tr class="finding-row sev-row-{{ f.severity|lower }}"
           tabindex="0" role="button" aria-expanded="false"
-          aria-controls="snippet-{{ loop.index }}">
+          aria-controls="snippet-{{ loop.index }}"
+          data-finding-id="{{ f.id }}"
+          data-report-id="{{ r.id }}">
         <td><span class="sev sev-{{ f.severity|lower }}">{{ f.severity }}</span></td>
         <td><a href="{{ url_for('rule', report_id=r.id, rule_id=f.rule_id) }}" onclick="event.stopPropagation()"><strong>{{ f.rule_id }}</strong></a></td>
         <td class="muted">{{ f.language }}</td>
+        <td>
+          <span class="conf conf-{{ (f.confidence or 'LOW')|lower }}">{{ f.confidence or 'LOW' }}</span>
+        </td>
         <td class="mono">{{ f.file|relpath }}<span class="subtle">:{{ f.line }}</span></td>
         <td>{{ f.message }}</td>
       </tr>
       <tr class="snippet-row" id="snippet-{{ loop.index }}" hidden>
-        <td colspan="5">
+        <td colspan="6">
           {% set meta = RULE_META.get(f.rule_id) %}
           {% if meta %}
           <div class="vuln-detail sev-row-{{ f.severity|lower }}">
@@ -84,6 +90,7 @@
               <div class="vuln-refs">
                 <span class="badge">{{ meta.cwe }}</span>
                 <span class="badge">{{ meta.owasp }}</span>
+                <span class="badge conf-badge conf-{{ (f.confidence or 'LOW')|lower }}">{{ f.confidence or 'LOW' }} confidence</span>
               </div>
             </div>
             <div class="vuln-grid">
@@ -106,6 +113,18 @@
               <pre class="snippet"><span class="ln">{{ f.line }}</span>{{ f.code_snippet }}</pre>
             </div>
             {% endif %}
+            <!-- AI Triage Section -->
+            <div class="ai-triage" id="ai-{{ f.id }}">
+              {% if f.ai_explanation %}
+                <div class="ai-label">AI Triage</div>
+                <div class="ai-text">{{ f.ai_explanation }}</div>
+              {% else %}
+                <button class="btn btn-ai" onclick="explainFinding({{ f.id }}, {{ r.id }}, event)">
+                  ✦ Explain with AI
+                </button>
+                <div class="ai-result" id="ai-result-{{ f.id }}" style="display:none;"></div>
+              {% endif %}
+            </div>
           </div>
           {% else %}
             <div class="vuln-detail">
@@ -113,11 +132,26 @@
                 <span class="vuln-label">Message</span>
                 <span>{{ f.message }}</span>
               </div>
+              <div class="vuln-section">
+                <span class="badge conf-badge conf-{{ (f.confidence or 'LOW')|lower }}">{{ f.confidence or 'LOW' }} confidence</span>
+              </div>
               {% if f.code_snippet %}
                 <pre class="snippet"><span class="ln">{{ f.line }}</span>{{ f.code_snippet }}</pre>
               {% else %}
                 <span class="subtle">No snippet captured.</span>
               {% endif %}
+              <!-- AI Triage Section -->
+              <div class="ai-triage" id="ai-{{ f.id }}" style="margin-top:12px;">
+                {% if f.ai_explanation %}
+                  <div class="ai-label">AI Triage</div>
+                  <div class="ai-text">{{ f.ai_explanation }}</div>
+                {% else %}
+                  <button class="btn btn-ai" onclick="explainFinding({{ f.id }}, {{ r.id }}, event)">
+                    ✦ Explain with AI
+                  </button>
+                  <div class="ai-result" id="ai-result-{{ f.id }}" style="display:none;"></div>
+                {% endif %}
+              </div>
             </div>
           {% endif %}
         </td>
@@ -158,5 +192,52 @@
       }
     });
   });
+
+  async function explainFinding(findingId, reportId, event) {
+    event.stopPropagation();
+    const btn = event.target;
+    const resultEl = document.getElementById('ai-result-' + findingId);
+    btn.disabled = true;
+    btn.textContent = '✦ Thinking…';
+    resultEl.style.display = 'none';
+    try {
+      const resp = await fetch(
+        `/report/${reportId}/finding/${findingId}/explain`,
+        { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } }
+      );
+      const data = await resp.json();
+      if (data.explanation) {
+        resultEl.innerHTML =
+          '<div class="ai-label">AI Triage</div>' +
+          '<div class="ai-text">' + data.explanation.replace(/\n/g, '<br>') + '</div>';
+        resultEl.style.display = 'block';
+        btn.style.display = 'none';
+      } else {
+        btn.textContent = '✦ Explain with AI';
+        btn.disabled = false;
+        resultEl.innerHTML = '<span class="muted">' + (data.error || 'Unknown error') + '</span>';
+        resultEl.style.display = 'block';
+      }
+    } catch (err) {
+      btn.textContent = '✦ Explain with AI';
+      btn.disabled = false;
+      resultEl.innerHTML = '<span class="muted">Request failed: ' + err + '</span>';
+      resultEl.style.display = 'block';
+    }
+  }
 </script>
+
+<style>
+  .conf { display:inline-block; padding:2px 7px; border-radius:4px; font-size:11px; font-weight:600; letter-spacing:.04em; }
+  .conf-high   { background:#fef3c7; color:#92400e; }
+  .conf-medium { background:#dbeafe; color:#1e40af; }
+  .conf-low    { background:#f3f4f6; color:#6b7280; }
+  .conf-badge  { font-size:11px; }
+  .btn-ai { background:#6d28d9; color:#fff; border:none; cursor:pointer; padding:6px 14px; border-radius:6px; font-size:13px; margin-top:10px; }
+  .btn-ai:hover { background:#5b21b6; }
+  .btn-ai:disabled { opacity:.6; cursor:default; }
+  .ai-triage { margin-top:12px; }
+  .ai-label  { font-size:11px; font-weight:700; color:#6d28d9; text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px; }
+  .ai-text   { font-size:13px; line-height:1.6; color:var(--text, #1f2937); background:rgba(109,40,217,.06); padding:10px 14px; border-radius:6px; border-left:3px solid #6d28d9; }
+</style>
 {% endblock %}

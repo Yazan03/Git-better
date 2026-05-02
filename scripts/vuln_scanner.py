@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
 Multi-language vulnerability scanner.
-Supports: Python, JavaScript/TypeScript, PHP, Java, Go, Bash, C
+Supports: Python, JavaScript/TypeScript, PHP, Java, Go, Bash, C, Dockerfile, GitHub Actions
 """
 import ast
+import concurrent.futures
 import io
+import math
 import re
 import json
+import subprocess
+import threading
 import tokenize
 import argparse
 import sys
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 
 @dataclass
@@ -23,6 +27,199 @@ class Finding:
     language: str
     message: str
     code_snippet: str = ""
+    confidence: str = "LOW"
+    cwe: str = ""
+    owasp: str = ""
+    ai_explanation: str = ""
+
+
+# ── CWE + OWASP mapping ───────────────────────────────────────────────────────
+
+RULE_META: dict[str, tuple[str, str]] = {
+    "SEC001":  ("CWE-798", "A07:2021"),
+    "SEC002":  ("CWE-78",  "A03:2021"),
+    "SEC002T": ("CWE-78",  "A03:2021"),
+    "SEC003":  ("CWE-617", "A05:2021"),
+    "SEC004":  ("CWE-89",  "A03:2021"),
+    "SEC004T": ("CWE-89",  "A03:2021"),
+    "SEC005":  ("CWE-327", "A02:2021"),
+    "SEC006":  ("CWE-79",  "A03:2021"),
+    "SEC006T": ("CWE-79",  "A03:2021"),
+    "SEC007":  ("CWE-79",  "A03:2021"),
+    "SEC008":  ("CWE-338", "A02:2021"),
+    "SEC009":  ("CWE-319", "A02:2021"),
+    "SEC010":  ("CWE-532", "A09:2021"),
+    "SEC011":  ("CWE-20",  "A03:2021"),
+    "SEC012":  ("CWE-78",  "A03:2021"),
+    "SEC013":  ("CWE-327", "A02:2021"),
+    "SEC014":  ("CWE-209", "A05:2021"),
+    "SEC015":  ("CWE-78",  "A03:2021"),
+    "SEC016":  ("CWE-502", "A08:2021"),
+    "SEC017":  ("CWE-209", "A05:2021"),
+    "SEC018":  ("CWE-338", "A02:2021"),
+    "SEC019":  ("CWE-532", "A09:2021"),
+    "SEC020":  ("CWE-295", "A02:2021"),
+    "SEC021":  ("CWE-78",  "A03:2021"),
+    "SEC022":  ("CWE-732", "A01:2021"),
+    "SEC023":  ("CWE-78",  "A03:2021"),
+    "SEC024":  ("CWE-176", "A03:2021"),
+    "SEC025":  ("CWE-176", "A03:2021"),
+    "SEC026":  ("CWE-94",  "A03:2021"),
+    "SEC026B": ("CWE-94",  "A03:2021"),
+    "SEC026C": ("CWE-94",  "A03:2021"),
+    "SEC026T": ("CWE-94",  "A03:2021"),
+    "SEC027":  ("CWE-22",  "A01:2021"),
+    "SEC027B": ("CWE-22",  "A01:2021"),
+    "SEC028":  ("CWE-693", "A05:2021"),
+    "SEC029":  ("CWE-502", "A08:2021"),
+    "SEC030":  ("CWE-502", "A08:2021"),
+    "SEC031":  ("CWE-502", "A08:2021"),
+    "SEC031B": ("CWE-502", "A08:2021"),
+    "SEC032":  ("CWE-502", "A08:2021"),
+    "SEC033":  ("CWE-434", "A04:2021"),
+    "SEC033B": ("CWE-434", "A04:2021"),
+    "SEC034":  ("CWE-434", "A04:2021"),
+    "SEC035":  ("CWE-22",  "A01:2021"),
+    "SEC035B": ("CWE-22",  "A01:2021"),
+    "SEC035C": ("CWE-22",  "A01:2021"),
+    "SEC035T": ("CWE-22",  "A01:2021"),
+    "SEC036":  ("CWE-73",  "A01:2021"),
+    "SEC037":  ("CWE-22",  "A01:2021"),
+    "SEC038":  ("CWE-22",  "A01:2021"),
+    "SEC039":  ("CWE-22",  "A01:2021"),
+    "SEC040":  ("CWE-22",  "A01:2021"),
+    "SEC041":  ("CWE-22",  "A01:2021"),
+    "SEC041B": ("CWE-22",  "A01:2021"),
+    "SEC042":  ("CWE-22",  "A01:2021"),
+    "SEC043":  ("CWE-347", "A02:2021"),
+    "SEC044":  ("CWE-347", "A02:2021"),
+    "SEC044B": ("CWE-347", "A02:2021"),
+    "SEC044C": ("CWE-347", "A02:2021"),
+    "SEC046":  ("CWE-347", "A02:2021"),
+    "SEC046B": ("CWE-347", "A02:2021"),
+    "SEC048":  ("CWE-20",  "A03:2021"),
+    "SEC049":  ("CWE-20",  "A03:2021"),
+    "SEC050":  ("CWE-347", "A02:2021"),
+    "SEC051":  ("CWE-90",  "A03:2021"),
+    "SEC051B": ("CWE-90",  "A03:2021"),
+    "SEC052":  ("CWE-90",  "A03:2021"),
+    "SEC053":  ("CWE-90",  "A03:2021"),
+    "SEC053B": ("CWE-90",  "A03:2021"),
+    "SEC054":  ("CWE-943", "A03:2021"),
+    "SEC055":  ("CWE-943", "A03:2021"),
+    "SEC056":  ("CWE-601", "A01:2021"),
+    "SEC056T": ("CWE-601", "A01:2021"),
+    "SEC057":  ("CWE-943", "A03:2021"),
+    "SEC057B": ("CWE-943", "A03:2021"),
+    "SEC060":  ("CWE-119", "A05:2021"),
+    "SEC060B": ("CWE-119", "A05:2021"),
+    "SEC060C": ("CWE-119", "A05:2021"),
+    "SEC060D": ("CWE-119", "A05:2021"),
+    "SEC061":  ("CWE-134", "A03:2021"),
+    "SEC062":  ("CWE-693", "A05:2021"),
+    "SEC062B": ("CWE-693", "A05:2021"),
+    "SEC062C": ("CWE-693", "A05:2021"),
+    "SEC062D": ("CWE-693", "A05:2021"),
+    "SEC063":  ("CWE-693", "A05:2021"),
+    "SEC063B": ("CWE-693", "A05:2021"),
+    "SEC064":  ("CWE-693", "A05:2021"),
+    "SEC064B": ("CWE-693", "A05:2021"),
+    "SEC064C": ("CWE-693", "A05:2021"),
+    "SEC064D": ("CWE-693", "A05:2021"),
+    "SEC064E": ("CWE-693", "A05:2021"),
+    "SEC065":  ("CWE-416", "A06:2021"),
+    # SEC066-SEC200: New rules from Semgrep open-source conversions
+    "SEC066":  ("CWE-918", "A10:2021"),   # SSRF - Python requests with user input
+    "SEC067":  ("CWE-611", "A05:2021"),   # XXE - xml import without defusedxml
+    "SEC068":  ("CWE-502", "A08:2021"),   # YAML injection - yaml.load unsafe
+    "SEC069":  ("CWE-502", "A08:2021"),   # Pickle/marshal unsafe
+    "SEC070":  ("CWE-352", "A01:2021"),   # Django CSRF exempt
+    "SEC071":  ("CWE-89",  "A03:2021"),   # Django raw SQL
+    "SEC072":  ("CWE-798", "A07:2021"),   # Django DEBUG=True
+    "SEC073":  ("CWE-798", "A07:2021"),   # Flask debug=True
+    "SEC074":  ("CWE-327", "A02:2021"),   # ECB mode cipher
+    "SEC075":  ("CWE-327", "A02:2021"),   # Weak key size RSA/AES
+    "SEC076":  ("CWE-327", "A02:2021"),   # DES/3DES/RC4/Blowfish
+    "SEC077":  ("CWE-208", "A02:2021"),   # Timing attack - non-constant-time comparison
+    "SEC078":  ("CWE-400", "A05:2021"),   # ReDoS - user-controlled regex
+    "SEC079":  ("CWE-377", "A01:2021"),   # Insecure temp file (mktemp)
+    "SEC080":  ("CWE-78",  "A03:2021"),   # subprocess with shell=True
+    "SEC081":  ("CWE-295", "A02:2021"),   # SSL weak protocols
+    "SEC082":  ("CWE-295", "A02:2021"),   # requests verify=False / check_hostname=False
+    "SEC083":  ("CWE-611", "A05:2021"),   # XXE - lxml/xml.sax without safe settings
+    "SEC084":  ("CWE-776", "A05:2021"),   # XML bomb / billion laughs
+    "SEC085":  ("CWE-327", "A02:2021"),   # hashlib.new with weak algorithm
+    "SEC086":  ("CWE-94",  "A03:2021"),   # Prototype pollution JS
+    "SEC087":  ("CWE-400", "A05:2021"),   # ReDoS - JS new RegExp with user input
+    "SEC088":  ("CWE-611", "A05:2021"),   # XXE - JS DOMParser/xml2js
+    "SEC089":  ("CWE-502", "A08:2021"),   # JS insecure deserialization node-serialize
+    "SEC090":  ("CWE-346", "A07:2021"),   # CORS wildcard with credentials
+    "SEC091":  ("CWE-327", "A02:2021"),   # JS crypto createCipher deprecated
+    "SEC092":  ("CWE-918", "A10:2021"),   # PHP SSRF curl_init with user URL
+    "SEC093":  ("CWE-502", "A08:2021"),   # PHP type juggling loose comparison
+    "SEC094":  ("CWE-89",  "A03:2021"),   # PHP extract/parse_str injection
+    "SEC095":  ("CWE-94",  "A03:2021"),   # PHP preg_replace /e modifier
+    "SEC096":  ("CWE-327", "A02:2021"),   # PHP openssl ECB / mcrypt
+    "SEC097":  ("CWE-295", "A02:2021"),   # PHP curl SSL verification disabled
+    "SEC098":  ("CWE-611", "A05:2021"),   # Java XXE - DocumentBuilderFactory
+    "SEC099":  ("CWE-918", "A10:2021"),   # Java SSRF - new URL(userInput)
+    "SEC100":  ("CWE-502", "A08:2021"),   # Java XMLDecoder/XStream deserialization
+    "SEC101":  ("CWE-117", "A09:2021"),   # Java log injection
+    "SEC102":  ("CWE-327", "A02:2021"),   # Java AES/ECB cipher
+    "SEC103":  ("CWE-918", "A10:2021"),   # Go SSRF http.Get with variable
+    "SEC104":  ("CWE-327", "A02:2021"),   # Go DES/RC4/MD5 usage
+    "SEC105":  ("CWE-295", "A02:2021"),   # Go TLS InsecureSkipVerify
+    "SEC106":  ("CWE-94",  "A03:2021"),   # Go text/template with user input
+    "SEC107":  ("CWE-117", "A09:2021"),   # Go log injection
+    "SEC108":  ("CWE-918", "A10:2021"),   # Bash curl/wget to variable URL
+    "SEC109":  ("CWE-20",  "A03:2021"),   # Bash IFS tampering
+    "SEC110":  ("CWE-78",  "A03:2021"),   # Bash command substitution with user input
+    "SEC111":  ("CWE-502", "A08:2021"),   # JS yaml.load unsafe (js-yaml)
+    "SEC112":  ("CWE-22",  "A01:2021"),   # Express path traversal sendFile
+    "SEC113":  ("CWE-208", "A02:2021"),   # JS timing attack token comparison
+    "SEC114":  ("CWE-346", "A07:2021"),   # CORS Access-Control-Allow-Origin wildcard
+    "SEC115":  ("CWE-776", "A05:2021"),   # xmlrpc import
+    "SEC116":  ("CWE-327", "A02:2021"),   # MD4/DES in Python cryptography library
+    "SEC117":  ("CWE-377", "A01:2021"),   # Go insecure tmp file creation
+    "SEC118":  ("CWE-502", "A08:2021"),   # Java Jackson enableDefaultTyping
+    "SEC119":  ("CWE-502", "A08:2021"),   # Java SnakeYAML unsafe constructor
+    "SEC120":  ("CWE-94",  "A03:2021"),   # Java SpEL injection
+    "SEC121":  ("CWE-798", "A07:2021"),   # Django/Flask SECRET_KEY hardcoded
+    "SEC122":  ("CWE-117", "A09:2021"),   # Python log injection
+    "SEC123":  ("CWE-327", "A02:2021"),   # Python ssl weak protocol
+    "SEC124":  ("CWE-78",  "A03:2021"),   # Python os.execv/os.execl family
+    "SEC125":  ("CWE-22",  "A01:2021"),   # PHP phpinfo exposure
+    "SEC126":  ("CWE-611", "A05:2021"),   # PHP XXE simplexml_load_string with LIBXML_NOENT
+    "SEC127":  ("CWE-94",  "A03:2021"),   # PHP mb_ereg_replace with /e modifier
+    "SEC128":  ("CWE-400", "A05:2021"),   # Go decompression bomb
+    "SEC129":  ("CWE-451", "A04:2021"),   # JS X-Frame-Options misconfiguration
+    "SEC130":  ("CWE-502", "A08:2021"),   # Python marshal.loads
+    "SEC131":  ("CWE-327", "A02:2021"),   # Python Cryptography: weak algorithms
+    "SEC132":  ("CWE-352", "A01:2021"),   # Flask/Django missing CSRF protection
+    "SEC133":  ("CWE-918", "A10:2021"),   # Python urllib SSRF with user input
+    "SEC134":  ("CWE-94",  "A03:2021"),   # PHP backtick operator
+    "SEC135":  ("CWE-327", "A02:2021"),   # PHP crypt/rot13 weak crypto
+    # SEC001E: entropy-based secret detection
+    "SEC001E": ("CWE-798", "A07:2021"),   # High-entropy string literal — possible secret
+    # SEC2xx: Dockerfile security rules
+    "SEC201":  ("CWE-269", "A05:2021"),   # Container runs as root
+    "SEC202":  ("CWE-78",  "A03:2021"),   # curl/wget piped to shell
+    "SEC203":  ("CWE-269", "A05:2021"),   # Privileged container
+    "SEC204":  ("CWE-1104","A06:2021"),   # :latest tag — no version pinning
+    "SEC205":  ("CWE-494", "A08:2021"),   # ADD with remote URL — no integrity check
+    "SEC206":  ("CWE-732", "A01:2021"),   # chmod 777 in container layer
+    "SEC207":  ("CWE-798", "A07:2021"),   # Secret in ENV instruction
+    "SEC208":  ("CWE-295", "A02:2021"),   # TLS verification disabled in Dockerfile
+    # SEC3xx: GitHub Actions security rules
+    "SEC301":  ("CWE-78",  "A03:2021"),   # Script injection via github.event
+    "SEC302":  ("CWE-269", "A05:2021"),   # pull_request_target pwn-request
+    "SEC303":  ("CWE-1104","A06:2021"),   # Action pinned to mutable ref
+    "SEC304":  ("CWE-78",  "A03:2021"),   # Shell step with injected expression
+    "SEC305":  ("CWE-266", "A05:2021"),   # Self-hosted runner
+    "SEC306":  ("CWE-532", "A09:2021"),   # Secret echoed in workflow log
+    "SEC307":  ("CWE-732", "A05:2021"),   # write-all permissions
+    "SEC308":  ("CWE-78",  "A03:2021"),   # env variable injection in run step
+}
 
 EXTENSION_MAP = {
     ".py":   "python",
@@ -41,12 +238,22 @@ EXTENSION_MAP = {
     ".cmake": "build",
     ".c":    "c",
     ".h":    "c",
+    # IaC formats detected via content/path in scan_file; listed here so
+    # rglob in main() picks them up.
+    ".yml":  "yaml_generic",
+    ".yaml": "yaml_generic",
 }
 
 FILENAME_MAP = {
     "makefile": "build",
     "gnumakefile": "build",
     "cmakelists.txt": "build",
+    # Dockerfile variants
+    "dockerfile": "dockerfile",
+    "dockerfile.dev": "dockerfile",
+    "dockerfile.prod": "dockerfile",
+    "dockerfile.test": "dockerfile",
+    "dockerfile.ci": "dockerfile",
 }
 
 
@@ -84,6 +291,120 @@ def _python_nocode_spans(source: str) -> tuple[list[tuple[int, int]], list[int]]
     return spans, offsets  # offsets[i] = start of (i+1)-th line
 
 
+# ── High-entropy string detection (SEC001E) ───────────────────────────────────
+
+# Known prefixes for popular secret formats — low-entropy bar when matched.
+_SECRET_PREFIXES: tuple[str, ...] = (
+    "AKIA", "ASIA", "AIPA",                    # AWS access/session keys
+    "ghp_", "ghs_", "gho_", "ghr_", "ghb_",   # GitHub tokens
+    "sk-",                                      # OpenAI / Anthropic
+    "xoxb-", "xoxa-", "xoxe-", "xoxp-",       # Slack tokens
+    "AIza",                                    # Google API key
+    "ya29.",                                   # Google OAuth token
+    "SG.",                                     # SendGrid
+    "EAA",                                     # Facebook access token
+    "Bearer ",                                 # OAuth bearer (literal in source)
+)
+
+_B64_ALPHA = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=-_"
+)
+_HEX_ALPHA = frozenset("0123456789abcdefABCDEF")
+
+
+def _shannon_entropy(s: str) -> float:
+    """Shannon entropy in bits per character."""
+    if not s:
+        return 0.0
+    freq: dict[str, int] = {}
+    for ch in s:
+        freq[ch] = freq.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+def _looks_like_secret(value: str) -> bool:
+    """
+    Return True if the string value is likely a hardcoded secret based on
+    character set and Shannon entropy — not a URL, path, or readable phrase.
+    """
+    if len(value) < 12:
+        return False
+    if any(value.startswith(p) for p in ("http://", "https://", "//", "/*", "*/")):
+        return False
+    if value.count("/") > 4:
+        return False
+    # Real secrets never contain spaces or parentheses.
+    # Strings like User-Agent headers, CSS values, or natural-language phrases
+    # all have spaces/parens and are caught here before the entropy check.
+    if " " in value or "(" in value or ")" in value:
+        return False
+    # High-signal known prefixes — lower entropy bar because the prefix is itself evidence.
+    if any(value.startswith(p) for p in _SECRET_PREFIXES):
+        return _shannon_entropy(value) >= 3.0
+    chars = frozenset(value)
+    ent   = _shannon_entropy(value)
+    # Pure hex strings (e.g. 40-char SHA1, 32-char MD5, API tokens).
+    if chars <= _HEX_ALPHA and len(value) >= 20:
+        return ent >= 3.5
+    # Base64-alphabet strings (JWT segments, base64-encoded secrets).
+    if chars <= _B64_ALPHA and len(value) >= 20:
+        return ent >= 4.0
+    # Generic fallback — require higher entropy to avoid natural-language FPs.
+    return ent >= 5.0 and len(value) >= 20
+
+
+# Matches string literals in most languages (minimum 12 chars inside).
+_STRING_LITERAL_RE = re.compile(
+    r'"([^"\\]{12,}(?:\\.[^"\\]*)*)"|'
+    r"'([^'\\]{12,}(?:\\.[^'\\]*)*)'"
+)
+
+
+def scan_entropy(path: Path, language: str) -> list[Finding]:
+    """
+    Detect high-entropy string literals that may be hardcoded secrets (SEC001E).
+    Complements SEC001 regex rules by catching API keys and tokens that lack
+    a recognisable variable-name prefix.
+    """
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    nosec = _NOSEC.get(language, "")
+    pfxs  = _COMMENT_PREFIX.get(language, ())
+    cwe, owasp = RULE_META.get("SEC001E", ("CWE-798", "A07:2021"))
+    findings: list[Finding] = []
+
+    for i, raw_line in enumerate(source.splitlines(), 1):
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if any(stripped.startswith(p) for p in pfxs):
+            continue
+        if nosec and nosec in raw_line.lower():
+            continue
+        for m in _STRING_LITERAL_RE.finditer(raw_line):
+            value = m.group(1) or m.group(2) or ""
+            if not _looks_like_secret(value):
+                continue
+            ent = _shannon_entropy(value)
+            findings.append(Finding(
+                file=str(path), line=i,
+                severity="HIGH", rule_id="SEC001E",
+                language=language,
+                message=(
+                    f"High-entropy string literal (entropy={ent:.2f} bits/char) — "
+                    "possible hardcoded API key, token, or credential"
+                ),
+                code_snippet=stripped[:120],
+                confidence="MEDIUM",
+                cwe=cwe, owasp=owasp,
+            ))
+    return findings
+
+
 # Per-language inline suppression marker (# nosec / // nosec).
 # A line containing this string (case-insensitive) is skipped entirely.
 _NOSEC: dict[str, str] = {
@@ -95,6 +416,8 @@ _NOSEC: dict[str, str] = {
     "java":       "// nosec",
     "go":         "// nosec",
     "c":          "// nosec",
+    "dockerfile": "# nosec",
+    "gha":        "# nosec",
 }
 
 # Single-line comment prefixes — full lines starting with these are skipped.
@@ -107,6 +430,8 @@ _COMMENT_PREFIX: dict[str, tuple[str, ...]] = {
     "go":         ("//",),
     "c":          ("//",),
     "php":        ("//", "#"),
+    "dockerfile": ("#",),
+    "gha":        ("#",),
 }
 
 # Languages that support /* … */ block comments.
@@ -187,7 +512,83 @@ RULES = {
                              "Unicode normalization on input - potential normalization/IDN injection risk"),        ("SEC025", "MEDIUM", r'\b(idna\.(encode|decode)|encodings\.idna)\b',
                              "IDN/punycode conversion - potential homograph/normalization injection risk"),
 
-
+        # ── Semgrep-derived new rules (SEC066+) ──────────────────────────────
+        # SSRF
+        ("SEC066", "HIGH",   r'\brequests\.(get|post|put|patch|delete|head|request)\s*\(.*\b(request\.(args|form|values|json|GET|POST|data)|input\s*\(|os\.environ)',
+                             "SSRF risk: requests call with user-controlled URL — validate and whitelist destinations"),
+        ("SEC066", "MEDIUM", r'\brequests\.(get|post|put|patch|delete|head|request)\s*\(\s*[A-Za-z_]\w*',
+                             "SSRF risk: requests call with variable URL — ensure destination is validated"),
+        ("SEC133", "HIGH",   r'\burllib(?:\.request)?\.urlopen\s*\(.*\b(request\.(args|form|values|json|GET|POST)|input\s*\()',
+                             "SSRF risk: urllib.urlopen with user-controlled URL — validate and whitelist destinations"),
+        ("SEC133", "MEDIUM", r'\burllib(?:\.request)?\.urlopen\s*\(\s*[A-Za-z_]\w*',
+                             "SSRF risk: urllib.urlopen with variable URL — ensure destination is validated"),
+        # XXE
+        ("SEC067", "MEDIUM", r'\bimport\s+xml(?:\s|$)|\bfrom\s+xml\b',
+                             "XML import detected — use defusedxml instead to prevent XXE attacks"),
+        ("SEC083", "HIGH",   r'\blxml\.etree\b|\bxml\.sax\b|\bxml\.dom\b|\bxml\.etree\b|\bXMLParser\s*\(',
+                             "XML parser usage — ensure external entities are disabled or use defusedxml"),
+        ("SEC115", "MEDIUM", r'\bimport\s+xmlrpc\b|\bimport\s+xmlrpclib\b|\bimport\s+SimpleXMLRPCServer\b',
+                             "xmlrpc usage — use defusedxml.xmlrpc to prevent XML entity attacks"),
+        # YAML injection
+        ("SEC068", "HIGH",   r'\byaml\.load\s*\([^)]*(?!\bLoader\s*=\s*yaml\.(?:Safe|Full|Base|Unsafe)Loader)',
+                             "yaml.load() without safe Loader — use yaml.safe_load() or yaml.load(data, Loader=yaml.SafeLoader)"),
+        # Pickle/marshal
+        ("SEC069", "HIGH",   r'\bpickle\.(load|loads|Unpickler)\s*\(',
+                             "Unsafe pickle deserialization — can lead to arbitrary code execution"),
+        ("SEC130", "HIGH",   r'\bmarshal\.(load|loads)\s*\(',
+                             "Unsafe marshal deserialization — can lead to arbitrary code execution"),
+        # Django-specific
+        ("SEC070", "HIGH",   r'@csrf_exempt\b',
+                             "CSRF protection disabled via @csrf_exempt — verify this endpoint does not change state"),
+        ("SEC071", "HIGH",   r'\b(raw\s*\(|RawSQL\s*\(|\.extra\s*\(.*where|cursor\.execute\s*\(.*%|cursor\.execute\s*\(.*\.format)',
+                             "Django raw SQL query — parameterize all inputs to prevent SQL injection"),
+        ("SEC072", "MEDIUM", r'\bDEBUG\s*=\s*True\b',
+                             "Django/Flask DEBUG=True — disable in production to prevent information leakage"),
+        ("SEC121", "HIGH",   r'\bSECRET_KEY\s*=\s*["\'][^"\']{1,50}["\']',
+                             "Hardcoded SECRET_KEY detected — use environment variables for secrets"),
+        # Flask-specific
+        ("SEC073", "MEDIUM", r'\bapp\.run\s*\(.*\bdebug\s*=\s*True',
+                             "Flask debug=True — disables security controls and exposes debugger in production"),
+        # Cryptography weak algorithms
+        ("SEC074", "HIGH",   r'\bAES\.(?:new|MODE_ECB)\b|(?:Cipher\.getInstance|mode\s*=\s*).*ECB',
+                             "ECB mode cipher — does not provide semantic security, use CBC or GCM"),
+        ("SEC076", "HIGH",   r'\b(DES|TripleDES|ARC4|Blowfish|DES3|ARC2)\b.*(?:new\s*\(|\.encrypt|\.decrypt)',
+                             "Weak cipher algorithm (DES/3DES/RC4/Blowfish/ARC4) — use AES-256-GCM"),
+        ("SEC116", "MEDIUM", r'\b(algorithms\.MD4|algorithms\.MD5|algorithms\.SHA1|algorithms\.Blowfish|algorithms\.ARC4|algorithms\.DES|algorithms\.TripleDES|algorithms\.RC4)\b',
+                             "Weak cryptographic algorithm in cryptography library — use SHA256+ or AES-GCM"),
+        ("SEC131", "MEDIUM", r'\bpadding\.PKCS1v15\s*\(\s*\)|\bpadding\.OAEP\s*\(.*\bMGF1\s*\(.*\bSHA1\b',
+                             "Weak RSA padding (PKCS1v15 or OAEP with SHA1) — use OAEP with SHA256"),
+        ("SEC085", "MEDIUM", r'\bhashlib\.new\s*\(\s*["\'](?:md5|sha1|md4|sha|ripemd160)["\']',
+                             "hashlib.new() with weak algorithm — use SHA256 or better"),
+        # Timing attacks
+        ("SEC077", "MEDIUM", r'\b(password|token|secret|key|hash|signature)\s*==\s*\w|\w\s*==\s*(password|token|secret|key|hash|signature)\b',
+                             "Non-constant-time string comparison for secret — use hmac.compare_digest() to prevent timing attacks"),
+        # ReDoS
+        ("SEC078", "MEDIUM", r'\bre\.compile\s*\(.*\b(request\.(args|form|values|json)|input\s*\()',
+                             "User-controlled regex pattern — catastrophic backtracking (ReDoS) risk"),
+        # Insecure temp file
+        ("SEC079", "MEDIUM", r'\btempfile\.mktemp\s*\(',
+                             "tempfile.mktemp() is insecure (race condition) — use tempfile.mkstemp() instead"),
+        # subprocess shell=True
+        ("SEC080", "HIGH",   r'\bsubprocess\.(run|Popen|call|check_call|check_output)\s*\([^)]*\bshell\s*=\s*True',
+                             "subprocess with shell=True — command injection risk, avoid or sanitize inputs"),
+        # SSL weak protocols
+        ("SEC081", "HIGH",   r'\bssl\.PROTOCOL_(?:TLSv1|SSLv2|SSLv3|SSLv23)\b',
+                             "Weak SSL/TLS protocol version — use ssl.PROTOCOL_TLS_CLIENT with minimum TLS 1.2"),
+        ("SEC082", "HIGH",   r'\bverify\s*=\s*False\b|\bcheck_hostname\s*=\s*False\b',
+                             "SSL certificate verification disabled — vulnerable to MITM attacks"),
+        # Python log injection
+        ("SEC122", "MEDIUM", r'\b(logging\.(info|debug|warning|error|critical|exception)|logger\.(info|debug|warning|error|critical|exception))\s*\(.*\+.*\b(request\.(args|form|values|json|GET|POST)|input\s*\()',
+                             "Log injection: user-controlled data in log message — sanitize newlines and control characters"),
+        # os.exec family
+        ("SEC124", "HIGH",   r'\bos\.exec(?:l|le|lp|lpe|v|ve|vp|vpe)\s*\(',
+                             "os.exec* replaces the current process — injection risk if arguments are user-controlled"),
+        # XML bomb
+        ("SEC084", "HIGH",   r'<!ENTITY\s+\w+\s+["\'].*&\w+;.*["\']',
+                             "Potential XML entity expansion attack (XML bomb / billion laughs)"),
+        # Python ssl protocol check
+        ("SEC123", "HIGH",   r'\bssl\.wrap_socket\s*\(',
+                             "ssl.wrap_socket() is deprecated — use ssl.SSLContext with TLSv1.2+ minimum"),
     ],
 
     "javascript": [
@@ -264,7 +665,51 @@ RULES = {
                              "Unicode normalization on input - potential normalization/IDN injection risk"),        ("SEC025", "MEDIUM", r'\bpunycode\.(toASCII|toUnicode)\s*\(|\b(domainToASCII|domainToUnicode)\s*\(',
                              "IDN/punycode conversion - potential homograph/normalization injection risk"),
 
-
+        # ── Semgrep-derived new rules (SEC066+) ──────────────────────────────
+        # Prototype pollution
+        ("SEC086", "HIGH",   r'(?:__proto__|constructor\s*\[|prototype\s*\[)',
+                             "Prototype pollution vector: __proto__ or constructor[prototype] assignment"),
+        ("SEC086", "HIGH",   r'Object\.assign\s*\(\s*(?:\{\}|[a-zA-Z_$][\w$]*)\s*,\s*(?:JSON\.parse|req\.|request\.)',
+                             "Prototype pollution via Object.assign with parsed/user-controlled data"),
+        # ReDoS
+        ("SEC087", "MEDIUM", r'new\s+RegExp\s*\(.*\b(req\.(query|params|body)|request\.(query|params|body))',
+                             "User-controlled regex (ReDoS risk) — never pass user input directly to new RegExp()"),
+        ("SEC087", "MEDIUM", r'\bnew\s+RegExp\s*\(\s*[A-Za-z_$][\w$]*',
+                             "Regex from variable (potential ReDoS) — ensure pattern is not user-controlled"),
+        # XXE
+        ("SEC088", "MEDIUM", r'\bnew\s+DOMParser\s*\(|\bxml2js\.parseString\s*\(|\bfast-xml-parser\b|require\s*\(\s*["\']xml2js["\']\s*\)',
+                             "XML parser usage — ensure external entity expansion is disabled to prevent XXE"),
+        # Insecure deserialization
+        ("SEC089", "HIGH",   r'\bserialize\s*\(|\bnode-serialize\b|require\s*\(\s*["\']node-serialize["\']\s*\)',
+                             "node-serialize: deserializing untrusted data can lead to RCE"),
+        # CORS
+        ("SEC090", "HIGH",   r'Access-Control-Allow-Origin.*\*|res\.header\s*\(\s*["\']Access-Control-Allow-Origin["\']\s*,\s*["\'][*]["\']\s*\)',
+                             "CORS wildcard (Access-Control-Allow-Origin: *) — restrict to specific trusted origins"),
+        ("SEC114", "HIGH",   r'Access-Control-Allow-Credentials.*true.*Access-Control-Allow-Origin.*\*|Access-Control-Allow-Origin.*\*.*Access-Control-Allow-Credentials.*true',
+                             "CORS wildcard with credentials=true — browsers block this but audit configuration"),
+        # Crypto
+        ("SEC091", "MEDIUM", r'\bcrypto\.createCipher\s*\(',
+                             "crypto.createCipher() is deprecated — use crypto.createCipheriv() with explicit IV"),
+        ("SEC074", "MEDIUM", r'["\']aes-\d+-ecb["\']|createCipheriv\s*\(\s*["\'][^"\']*ecb["\']',
+                             "ECB cipher mode — does not provide semantic security, use CBC or GCM mode"),
+        # YAML injection
+        ("SEC111", "HIGH",   r'\byaml\.load\s*\(|\brequire\s*\(\s*["\']js-yaml["\']\s*\).*\.load\s*\(',
+                             "js-yaml yaml.load() unsafe — use yaml.safeLoad() or load with SAFE_SCHEMA"),
+        # Path traversal Express
+        ("SEC112", "HIGH",   r'\bres\.sendFile\s*\(.*\b(req\.(query|params|body)|request\.(query|params|body))',
+                             "Express res.sendFile with user input — path traversal risk, use path.basename() and whitelist"),
+        # Timing attack
+        ("SEC113", "MEDIUM", r'(?:token|secret|password|hash|signature|key)\s*===?\s*\w|\w\s*===?\s*(?:token|secret|password|hash|signature)',
+                             "Non-constant-time comparison for secret — use crypto.timingSafeEqual() to prevent timing attacks"),
+        # X-Frame-Options
+        ("SEC129", "LOW",    r'X-Frame-Options.*ALLOWALL|res\.(?:set|setHeader)\s*\(\s*["\']X-Frame-Options["\']\s*,\s*["\']ALLOWALL["\']\s*\)',
+                             "X-Frame-Options set to ALLOWALL — allows clickjacking from any origin"),
+        # child_process injection
+        ("SEC080", "HIGH",   r'\bchild_process\b.*\b(exec|execSync|spawn|spawnSync)\s*\(.*\b(req\.(query|params|body)|request\.(query|params|body))',
+                             "child_process execution with user input — command injection risk"),
+        # dangerouslySetInnerHTML already in SEC007 but add explicit with user input
+        ("SEC007", "HIGH",   r'dangerouslySetInnerHTML\s*=\s*\{\s*\{.*\b(props\.|state\.|this\.state|req\.|request\.)',
+                             "React dangerouslySetInnerHTML with dynamic/user data — XSS risk"),
     ],
 
     "php": [
@@ -358,7 +803,41 @@ RULES = {
                              "Unicode normalization on input - potential normalization/IDN injection risk"),        ("SEC025", "MEDIUM", r'\bidn_to_(ascii|utf8)\s*\(',
                              "IDN/punycode conversion - potential homograph/normalization injection risk"),
 
-
+        # ── Semgrep-derived new rules (SEC066+) ──────────────────────────────
+        # SSRF
+        ("SEC092", "HIGH",   r'\bcurl_init\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)|\bfile_get_contents\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)',
+                             "SSRF risk: PHP URL fetch with user-controlled URL — validate and whitelist destinations"),
+        # SSL verification disabled
+        ("SEC097", "HIGH",   r'\bcurl_setopt\s*\(.*CURLOPT_SSL_VERIFYPEER\s*,\s*(0|false|null)\b',
+                             "PHP cURL SSL verification disabled (CURLOPT_SSL_VERIFYPEER=false) — vulnerable to MITM"),
+        # Type juggling
+        ("SEC093", "HIGH",   r'\bif\s*\(.*==\s*(0|false|null|true|["\'][^"\']*["\'])|===\s*\d+\s*&&|\bswitch\s*\(\s*\$',
+                             "Loose PHP comparison (==) — type juggling can bypass authentication checks, use ==="),
+        # extract/parse_str injection
+        ("SEC094", "HIGH",   r'\bextract\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)|\bparse_str\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)',
+                             "extract() or parse_str() with user input — variable injection risk"),
+        # preg_replace /e modifier
+        ("SEC095", "HIGH",   r'\bpreg_replace\s*\(\s*["\'][^"\']*\/e["\']',
+                             "preg_replace() with /e modifier executes PHP code — use preg_replace_callback() instead"),
+        # mcrypt / weak crypto
+        ("SEC096", "HIGH",   r'\b(mcrypt_encrypt|mcrypt_decrypt|mcrypt_module_open)\s*\(',
+                             "mcrypt is deprecated — use OpenSSL or Sodium for encryption"),
+        ("SEC135", "MEDIUM", r'\b(crypt\s*\(|str_rot13\s*\(|hash\s*\(\s*["\'](?:md5|sha1|crc32)["\'])',
+                             "Weak PHP cryptographic function — use password_hash() for passwords, SHA256+ for hashing"),
+        # XXE
+        ("SEC126", "HIGH",   r'\bsimplexml_load_(?:string|file)\s*\(.*LIBXML_NOENT|\bnew\s+DOMDocument\s*\(.*LIBXML_NOENT',
+                             "PHP XML parser with LIBXML_NOENT enables external entity processing — XXE risk"),
+        ("SEC126", "HIGH",   r'\blibxml_disable_entity_loader\s*\(\s*false\s*\)',
+                             "libxml_disable_entity_loader(false) explicitly enables external entity loading — XXE risk"),
+        # phpinfo exposure
+        ("SEC125", "MEDIUM", r'\bphpinfo\s*\(',
+                             "phpinfo() exposes server configuration and installed modules — remove from production code"),
+        # mb_ereg_replace /e
+        ("SEC127", "HIGH",   r'\bmb_ereg_replace\s*\([^,]+,[^,]+,[^,]+,\s*["\'][^"\']*e["\']',
+                             "mb_ereg_replace() with 'e' modifier executes PHP code — use mb_ereg_replace_callback()"),
+        # Backtick operator
+        ("SEC134", "HIGH",   r'`[^`]*\$[a-zA-Z_]',
+                             "Backtick operator with variable — shell command injection risk"),
     ],
 
     "java": [
@@ -428,7 +907,34 @@ RULES = {
                              "Unicode normalization on input - potential normalization/IDN injection risk"),        ("SEC025", "MEDIUM", r'\bIDN\.(toASCII|toUnicode)\s*\(',
                              "IDN/punycode conversion - potential homograph/normalization injection risk"),
 
-
+        # ── Semgrep-derived new rules (SEC066+) ──────────────────────────────
+        # XXE - DocumentBuilderFactory
+        ("SEC098", "HIGH",   r'\bDocumentBuilderFactory\.newInstance\s*\(|\bnew\s+DocumentBuilder\b|\bSAXParserFactory\.newInstance\s*\(',
+                             "XML parser factory without disabling external entities — XXE risk, set FEATURE_SECURE_PROCESSING"),
+        ("SEC083", "HIGH",   r'\bXMLInputFactory\.newInstance\s*\(|\bXMLInputFactory\.newFactory\s*\(',
+                             "XMLInputFactory without disabling external entities — XXE risk"),
+        # SSRF
+        ("SEC099", "HIGH",   r'\bnew\s+URL\s*\([^)]*(?:request\.getParameter|getQueryString|getPathInfo)\s*\(|new\s+URL\s*\(.*\+\s*(?:request|param|input)\b',
+                             "Java SSRF: new URL() with user input — validate and whitelist URL destinations"),
+        # Deserialization
+        ("SEC100", "HIGH",   r'\bXMLDecoder\s*\(|\bXStream\b|\bObjectInputStream\b.*\breadObject\s*\(',
+                             "Insecure Java deserialization (XMLDecoder/XStream/ObjectInputStream) — can lead to RCE"),
+        ("SEC118", "HIGH",   r'\benableDefaultTyping\s*\(|\bactivateDefaultTyping\s*\(',
+                             "Jackson enableDefaultTyping()/activateDefaultTyping() — polymorphic deserialization RCE risk"),
+        ("SEC119", "HIGH",   r'\bnew\s+Yaml\s*\(\s*\)(?!\s*\.\s*(?:setTag|addImplicitResolver|setBeanAccess))|org\.yaml\.snakeyaml\.Yaml\s*\(\s*\)',
+                             "SnakeYAML Yaml() without SafeConstructor — unsafe deserialization, use new Yaml(new SafeConstructor())"),
+        # Log injection
+        ("SEC101", "MEDIUM", r'\b(?:log(?:ger)?|LOG)\s*\.\s*(?:info|warn|error|debug|trace)\s*\(\s*["\'][^"\']*["\']\s*\+\s*(?:request\.getParameter|getQueryString|getPathInfo)',
+                             "Log injection: user-controlled data concatenated in log message — sanitize newlines and control characters"),
+        # Crypto
+        ("SEC102", "HIGH",   r'Cipher\.getInstance\s*\(\s*["\'](?:AES/ECB|DES|DESede|RC2|RC4|Blowfish)["\']',
+                             "Insecure cipher algorithm or mode (ECB/DES/3DES/RC4) — use AES/GCM/NoPadding"),
+        # SpEL injection
+        ("SEC120", "HIGH",   r'\bSpelExpressionParser\b|\bExpressionParser\b.*\bparseExpression\b|\b@Value\s*\(\s*["\']#\{.*\+',
+                             "Spring Expression Language (SpEL) with dynamic/user-controlled expression — SpEL injection risk"),
+        # YAML
+        ("SEC119", "HIGH",   r'\byaml\.load\s*\(|\bYaml\s*\(\s*\)\s*\.\s*load\s*\(',
+                             "Unsafe YAML load — use SafeConstructor to prevent object deserialization"),
     ],
 
     "go": [
@@ -490,7 +996,32 @@ RULES = {
                              "Unicode normalization on input - potential normalization/IDN injection risk"),        ("SEC025", "MEDIUM", r'\b(idna\.(ToASCII|ToUnicode)|golang\.org/x/net/idna)\b',
                              "IDN/punycode conversion - potential homograph/normalization injection risk"),
 
-
+        # ── Semgrep-derived new rules (SEC066+) ──────────────────────────────
+        # SSRF
+        ("SEC103", "HIGH",   r'\bhttp\.Get\s*\(.*\b(?:r\.|req\.|c\.(?:Param|Query)|os\.Args|fmt\.Sprintf)',
+                             "SSRF risk: http.Get with user-controlled URL — validate and whitelist destinations"),
+        ("SEC103", "HIGH",   r'\bhttp\.(?:Post|Head|Do)\s*\(.*\b(?:r\.|req\.|c\.(?:Param|Query)|fmt\.Sprintf)',
+                             "SSRF risk: http client call with potentially user-controlled URL"),
+        # Weak crypto
+        ("SEC104", "HIGH",   r'\bdes\.NewCipher\s*\(|\brc4\.NewCipher\s*\(|\bdes\.NewTripleDESCipher\s*\(|\bblowfish\.NewCipher\s*\(',
+                             "Weak cipher (DES/3DES/RC4/Blowfish) — use AES-256-GCM from crypto/aes"),
+        ("SEC104", "MEDIUM", r'\bmd5\.New\s*\(|\bmd5\.Sum\s*\(|\bsha1\.New\s*\(|\bsha1\.Sum\s*\(',
+                             "Weak hash algorithm (MD5/SHA1) — use SHA256 or SHA3"),
+        # TLS InsecureSkipVerify
+        ("SEC105", "HIGH",   r'\bInsecureSkipVerify\s*:\s*true\b',
+                             "TLS certificate verification disabled (InsecureSkipVerify:true) — vulnerable to MITM attacks"),
+        # text/template injection
+        ("SEC106", "HIGH",   r'\btemplate\.Must\s*\(\s*template\.New|text/template.*Execute\s*\(.*\b(?:r\.|req\.|c\.(?:Param|Query))',
+                             "text/template with user-controlled data — use html/template for web content to prevent injection"),
+        # Log injection
+        ("SEC107", "MEDIUM", r'\b(?:log|logger)\s*\.\s*(?:Printf|Println|Sprintf)\s*\(.*\b(?:r\.|req\.|c\.(?:Param|Query)|os\.Args)',
+                             "Log injection: user-controlled data in log message — sanitize newlines and control characters"),
+        # Insecure tmp file
+        ("SEC117", "MEDIUM", r'\bioutil\.WriteFile\s*\(\s*["\'][^"\']*(?:/tmp/|\\temp\\)',
+                             "Insecure temp file creation in shared /tmp — use ioutil.TempFile/os.CreateTemp instead"),
+        # Decompression bomb
+        ("SEC128", "MEDIUM", r'\bflate\.NewReader\s*\(|\bgzip\.NewReader\s*\(|\bzlib\.NewReader\s*\(',
+                             "Decompression without size limit — risk of decompression bomb (zip bomb) attack"),
     ],
 
     "bash": [
@@ -533,6 +1064,17 @@ RULES = {
         ("SEC064E","HIGH",   r'(?i)\b/DYNAMICBASE\s*:\s*NO\b',
                              "ASLR disabled via /DYNAMICBASE:NO"),
         ("SEC009", "MEDIUM", r'http://',                     "Insecure HTTP protocol"),
+
+        # ── Semgrep-derived new rules (SEC066+) ──────────────────────────────
+        # curl/wget to arbitrary variable URLs
+        ("SEC108", "HIGH",   r'\b(curl|wget)\s+[^|&;\n]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?',
+                             "curl/wget with variable URL — user-controlled URL could lead to SSRF"),
+        # IFS tampering
+        ("SEC109", "MEDIUM", r'\bIFS\s*=',
+                             "IFS variable modification — affects word splitting globally, can lead to unexpected command execution"),
+        # Command substitution with user input
+        ("SEC110", "HIGH",   r'\$\(.*\$\{?[1-9@*]\}?\s*\)|\`[^\`]*\$\{?[1-9@*]\}?[^\`]*\`',
+                             "Command substitution with positional argument — shell injection risk if input is unsanitized"),
     ],
     "build": [
         ("SEC064", "HIGH",   r'(?i)\b-Wl,-z,execstack\b|\b-z\s+execstack\b',
@@ -573,6 +1115,72 @@ RULES = {
                              "ASLR disabled via linker option /DYNAMICBASE:NO"),
         ("SEC065", "HIGH",   r'\bfree\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;\s*[^;]*\b(\1\s*->|\1\s*\[|\*\s*\1|\1\s*\.)',
                              "Potential use-after-free: pointer dereferenced after free on same line"),
+    ],
+
+    # ── Dockerfile security rules ─────────────────────────────────────────────
+    "dockerfile": [
+        ("SEC001",  "HIGH",
+         r'(?i)(?:password|passwd|secret|api_key|token|credential|auth)\s*=\s*\S{4,}',
+         "Hardcoded credential in Dockerfile — use Docker secrets (--secret) or runtime environment injection"),
+        ("SEC201",  "HIGH",
+         r'(?i)^\s*USER\s+(?:root|0)\s*$',
+         "Container runs as root — add a non-root USER instruction to reduce blast radius"),
+        ("SEC202",  "HIGH",
+         r'(?i)(?:curl|wget)\s+[^\n|]*\|\s*(?:bash|sh|python\d*|perl|ruby)\b',
+         "Remote code execution: piping curl/wget output to a shell interpreter"),
+        ("SEC203",  "HIGH",
+         r'--privileged\b',
+         "Privileged container grants all host capabilities — avoid unless strictly required"),
+        ("SEC204",  "LOW",
+         r'(?i)(?:^|\s)FROM\s+\S+:latest(?:\s|$)',
+         "Image pinned to :latest — use a specific digest (sha256:…) for reproducible builds"),
+        ("SEC205",  "HIGH",
+         r'(?i)^\s*ADD\s+https?://',
+         "ADD with remote URL skips integrity checks — use RUN curl + sha256sum instead"),
+        ("SEC206",  "MEDIUM",
+         r'\bchmod\s+(?:777|a\+rwx|ugo\+rwx)\b',
+         "chmod 777 / a+rwx — overly permissive file mode baked into image layer"),
+        ("SEC207",  "HIGH",
+         r'(?i)^\s*ENV\s+(?:PASSWORD|PASSWD|SECRET|API_KEY|TOKEN|PRIVATE_KEY|ACCESS_KEY)\s*=\s*\S+',
+         "Secret in ENV instruction is baked into the image — use Docker secrets or runtime injection"),
+        ("SEC208",  "MEDIUM",
+         r'(?i)(?:curl|wget)\s+(?:[^\n]*\s)?(?:-k|--insecure)\b',
+         "TLS verification disabled in Dockerfile RUN step — remove -k / --insecure"),
+        ("SEC001E", "MEDIUM",
+         r'(?i)(?:ARG|ENV)\s+\S+=\S{16,}',
+         "Long value in ARG/ENV — verify this is not a hardcoded secret"),
+    ],
+
+    # ── GitHub Actions security rules ─────────────────────────────────────────
+    "gha": [
+        ("SEC301",  "HIGH",
+         r'\$\{\{\s*github\.event\.(?:pull_request|issue|comment|review|review_comment)'
+         r'\.(?:body|title|name|head\.sha|head\.ref)\s*\}\}',
+         "Untrusted user input in workflow expression — script injection if interpolated in run: or env:"),
+        ("SEC302",  "HIGH",
+         r'on:\s*\[?pull_request_target',
+         "pull_request_target executes workflow code from fork context — pwn-request attack vector"),
+        ("SEC303",  "MEDIUM",
+         r'uses:\s+[^@\s]+@(?:main|master|HEAD|v?\d+(?!\.\d+))\b',
+         "Action pinned to mutable ref (branch/major tag) — pin to a full commit SHA for supply chain safety"),
+        ("SEC304",  "HIGH",
+         r'run:.*\$\{\{\s*github\.event\.',
+         "Shell run step interpolates GitHub event data — expression/command injection risk"),
+        ("SEC305",  "MEDIUM",
+         r'runs-on:\s*(?:\[?\s*)?self-hosted',
+         "Self-hosted runner — ensure runner is isolated and ephemeral to prevent supply chain attacks"),
+        ("SEC306",  "HIGH",
+         r'(?:echo|printf|::set-output)\s+.*\$\{\{\s*secrets\.',
+         "Secret value may be echoed to workflow log — use ::add-mask:: to redact"),
+        ("SEC307",  "MEDIUM",
+         r'permissions:\s*write-all',
+         "Overly broad permissions: write-all — grant only the minimum required permissions"),
+        ("SEC308",  "HIGH",
+         r'\$\{\{\s*(?:inputs|env)\.[A-Za-z_]\w*\s*\}\}',
+         "Workflow input/env variable interpolated directly — validate before use to prevent injection"),
+        ("SEC001",  "HIGH",
+         r'(?i)(?:password|secret|api_key|token|credential)\s*:\s*["\']?[A-Za-z0-9+/]{16,}["\']?',
+         "Possible hardcoded secret in workflow file — use repository secrets instead"),
     ],
 }
 
@@ -621,6 +1229,11 @@ _TAINT_SOURCES: dict[str, list[str]] = {
         r'\binput\s*\(',
         r'\bsys\.argv\b',
         r'\bos\.environ\b',
+        # Django-specific sources
+        r'\brequest\.(GET|POST|FILES|META)\b',
+        r'\brequest\.resolver_match\.kwargs\b',
+        # Flask-specific sources
+        r'\bflask\.request\.(args|form|values|json|data|cookies|headers)\b',
     ],
     "javascript": [
         r'\breq(?:uest)?\.(query|body|params|headers|cookies)\b',
@@ -628,27 +1241,44 @@ _TAINT_SOURCES: dict[str, list[str]] = {
         r'\blocation\.(search|hash|href|pathname)\b',
         r'\bdocument\.URL\b',
         r'\bevent\.(target|data|detail)\b',
+        # Express-specific
+        r'\breq\.(?:originalUrl|url|path)\b',
+        # Browser
+        r'\bdocument\.(?:cookie|referrer)\b',
+        r'\bwindow\.(?:location|name)\b',
+        r'\bURLSearchParams\b',
     ],
     "php": [
         r'\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)\b',
         r'\bgetenv\s*\(',
         r'\bphp://input\b',
+        r'\$_ENV\b',
+        r'\bapache_request_headers\s*\(',
     ],
     "java": [
         r'\brequest\.getParameter\s*\(',
         r'\brequest\.getHeader\s*\(',
         r'\brequest\.(getInputStream|getReader)\s*\(',
         r'\bgetQueryString\s*\(',
+        # Spring-specific sources
+        r'@PathVariable\b',
+        r'@RequestParam\b',
+        r'@RequestBody\b',
+        r'\bbindingResult\b',
     ],
     "go": [
         r'\b(?:r|req)\.(FormValue|PostFormValue)\s*\(',
         r'\b(?:r|req)\.URL\.Query\(\)\.Get\s*\(',
         r'\bc\.(Param|Query|GetHeader)\s*\(',
         r'\bos\.Args\b',
+        # Gin/Echo/Fiber-specific
+        r'\bc\.(?:QueryParam|FormValue|Param)\s*\(',
+        r'\bctx\.(?:QueryParam|FormValue|Param)\s*\(',
     ],
     "bash": [
         r'(?<!\$)\$\{?(?:[1-9]|@|\*)\}?',   # positional args $1..$9, $@, $*
         r'\bread\s+\w+',
+        r'\$\{?[A-Z_]+\}?\s*=.*\$\{?(?:QUERY_STRING|REQUEST_URI|HTTP_)\w+',  # CGI env vars
     ],
 }
 
@@ -669,6 +1299,19 @@ _TAINT_SINKS: dict[str, list[tuple[str, str, str, str]]] = {
         ("SEC056T", "MEDIUM",
          r'\b(?:redirect|HttpResponseRedirect)\s*\(',
          "Redirect sink — user-controlled variable used as redirect URL"),
+        # New sinks from Semgrep rules
+        ("SEC066", "HIGH",
+         r'\brequests\.(get|post|put|patch|delete|head|request)\s*\(',
+         "SSRF sink — user-controlled variable used as URL in HTTP request"),
+        ("SEC133", "HIGH",
+         r'\burllib(?:\.request)?\.urlopen\s*\(',
+         "SSRF sink — user-controlled variable used as URL in urllib.urlopen"),
+        ("SEC068", "HIGH",
+         r'\byaml\.load\s*\(',
+         "YAML injection sink — user-controlled variable passed to yaml.load()"),
+        ("SEC069", "HIGH",
+         r'\bpickle\.(?:load|loads|Unpickler)\s*\(',
+         "Deserialization sink — user-controlled data passed to pickle"),
     ],
     "javascript": [
         ("SEC004T", "HIGH",
@@ -686,6 +1329,16 @@ _TAINT_SINKS: dict[str, list[tuple[str, str, str, str]]] = {
         ("SEC056T", "MEDIUM",
          r'\bres(?:ponse)?\.redirect\s*\(',
          "Redirect sink — user-controlled variable used as redirect URL"),
+        # New sinks from Semgrep rules
+        ("SEC080", "HIGH",
+         r'\bchild_process\b.*\b(?:exec|execSync|spawn|spawnSync)\s*\(',
+         "Command sink — user-controlled variable passed to child_process"),
+        ("SEC087", "MEDIUM",
+         r'\bnew\s+RegExp\s*\(',
+         "ReDoS sink — user-controlled variable used as regex pattern"),
+        ("SEC112", "HIGH",
+         r'\bres\.sendFile\s*\(',
+         "Path traversal sink — user-controlled variable used in sendFile"),
     ],
     "php": [
         ("SEC004T", "HIGH",
@@ -697,6 +1350,13 @@ _TAINT_SINKS: dict[str, list[tuple[str, str, str, str]]] = {
         ("SEC035T", "HIGH",
          r'\b(?:include|require|include_once|require_once|file_get_contents|fopen)\b',
          "File-inclusion sink — user-controlled variable used as path"),
+        # New sinks from Semgrep rules
+        ("SEC092", "HIGH",
+         r'\b(?:curl_init|curl_setopt)\s*\(',
+         "SSRF sink — user-controlled variable used as URL in cURL"),
+        ("SEC095", "HIGH",
+         r'\bpreg_replace\s*\(',
+         "Code injection sink — user-controlled variable in preg_replace with /e modifier"),
     ],
     "java": [
         ("SEC004T", "HIGH",
@@ -705,6 +1365,16 @@ _TAINT_SINKS: dict[str, list[tuple[str, str, str, str]]] = {
         ("SEC002T", "HIGH",
          r'\bRuntime\.getRuntime\(\)\.exec\s*\(',
          "Command sink — user-controlled variable flows into exec()"),
+        # New sinks from Semgrep rules
+        ("SEC099", "HIGH",
+         r'\bnew\s+URL\s*\(',
+         "SSRF sink — user-controlled variable used in URL constructor"),
+        ("SEC101", "MEDIUM",
+         r'\b(?:log(?:ger)?|LOG)\s*\.\s*(?:info|warn|error|debug|trace)\s*\(',
+         "Log injection sink — user-controlled variable in log statement"),
+        ("SEC120", "HIGH",
+         r'\b(?:parseExpression|getValue|setValue)\s*\(',
+         "SpEL injection sink — user-controlled variable in SpEL expression"),
     ],
     "go": [
         ("SEC004T", "HIGH",
@@ -716,6 +1386,13 @@ _TAINT_SINKS: dict[str, list[tuple[str, str, str, str]]] = {
         ("SEC035T", "HIGH",
          r'\bos\.(?:Open|ReadFile|OpenFile)\s*\(',
          "File-operation sink — user-controlled variable used as path"),
+        # New sinks from Semgrep rules
+        ("SEC103", "HIGH",
+         r'\bhttp\.(?:Get|Post|Head|Do)\s*\(',
+         "SSRF sink — user-controlled variable used as HTTP URL"),
+        ("SEC107", "MEDIUM",
+         r'\b(?:log|logger)\s*\.\s*(?:Printf|Println|Sprintf)\s*\(',
+         "Log injection sink — user-controlled variable in log statement"),
     ],
 }
 
@@ -753,7 +1430,7 @@ def _lhs_name(line: str, language: str) -> str | None:
     return None
 
 
-def scan_taint(path: Path, language: str) -> list[Finding]:
+def scan_taint(path: Path, language: str, taint_window: int = 25) -> list[Finding]:
     """
     Cross-line source-to-sink taint analysis for all supported languages.
 
@@ -762,7 +1439,7 @@ def scan_taint(path: Path, language: str) -> list[Finding]:
     Pass 1 — collect every assignment of the form  ``name = <source>``  and
              record {var_name: [line_numbers]}.
     Pass 2 — for each sink call, check whether any tainted variable appears as
-             an argument within WINDOW lines of the most recent source assignment.
+             an argument within taint_window lines of the most recent source assignment.
 
     This catches patterns like::
 
@@ -771,8 +1448,6 @@ def scan_taint(path: Path, language: str) -> list[Finding]:
 
     which single-line regex rules cannot detect.
     """
-    WINDOW = 25
-
     sources = _TAINT_SOURCES.get(language, [])
     sinks   = _TAINT_SINKS.get(language, [])
     if not sources or not sinks:
@@ -812,13 +1487,14 @@ def scan_taint(path: Path, language: str) -> list[Finding]:
             for var, src_lines in tainted.items():
                 if not re.search(r'\b' + re.escape(var) + r'\b', line):
                     continue
-                nearby = [s for s in src_lines if 0 < i - s <= WINDOW]
+                nearby = [s for s in src_lines if 0 < i - s <= taint_window]
                 if not nearby:
                     continue
                 key = (i, rule_id)
                 if key in reported:
                     continue
                 reported.add(key)
+                cwe, owasp = RULE_META.get(rule_id, ("", ""))
                 findings.append(Finding(
                     file=str(path),
                     line=i,
@@ -827,6 +1503,9 @@ def scan_taint(path: Path, language: str) -> list[Finding]:
                     language=language,
                     message=f"{message} — tainted by user input on line {max(nearby)}",
                     code_snippet=stripped[:120],
+                    confidence="MEDIUM",
+                    cwe=cwe,
+                    owasp=owasp,
                 ))
 
     return findings
@@ -950,7 +1629,10 @@ def _uses_tainted(node: ast.expr, tainted: set[str]) -> bool:
     return False
 
 
-def _propagate_taint(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+def _propagate_taint(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    tainted_funcs: frozenset[str] = frozenset(),
+) -> set[str]:
     """
     Fixed-point taint propagation within a function body.
 
@@ -961,6 +1643,9 @@ def _propagate_taint(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
         y = x.strip()
         z = f"SELECT … {y}"
         cursor.execute(z)        # ← z is tainted
+
+    If tainted_funcs is non-empty, calls to those functions are also treated
+    as taint sources (inter-procedural taint propagation).
     """
     tainted: set[str] = set()
     while True:
@@ -976,7 +1661,14 @@ def _propagate_taint(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
                 rhs, targets = node.value, [node.target]
             if rhs is None:
                 continue
-            if _is_py_source(rhs) or _uses_tainted(rhs, tainted):
+            is_tainted = _is_py_source(rhs) or _uses_tainted(rhs, tainted)
+            # Inter-procedural: calls to known tainted functions are also sources
+            if not is_tainted and tainted_funcs and isinstance(rhs, ast.Call):
+                call_name = _py_call_name(rhs)
+                last = call_name.rsplit(".", 1)[-1]
+                if call_name in tainted_funcs or last in tainted_funcs:
+                    is_tainted = True
+            if is_tainted:
                 for t in targets:
                     if isinstance(t, ast.Name):
                         tainted.add(t.id)
@@ -989,14 +1681,17 @@ def _propagate_taint(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     return tainted
 
 
-def scan_python_ast_taint(path: Path) -> list[Finding]:
+def scan_python_ast_taint(
+    path: Path,
+    cross_file_funcs: frozenset[str] = frozenset(),
+) -> list[Finding]:
     """
     Intra-function taint analysis for Python using the AST.
 
-    For each function/method in the file:
-      1. Compute the fixed-point taint set (variables that hold user-controlled data).
-      2. Walk every Call node; if any argument uses a tainted variable and the
-         callee is a known dangerous sink, emit a finding.
+    Phase 1: For each function, propagate taint. If any return value is tainted,
+             add the function name to tainted_funcs.
+    Phase 2: Re-run with tainted_funcs (intra-file) + cross_file_funcs (cross-file)
+             so calls to those functions are also treated as taint sources.
 
     This catches multi-assignment taint chains that single-line regex cannot.
     """
@@ -1007,14 +1702,29 @@ def scan_python_ast_taint(path: Path) -> list[Finding]:
     except SyntaxError:
         return []
 
+    # Phase 1: collect all functions in this file whose return values are tainted
+    tainted_funcs: set[str] = set()
+    all_funcs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for func in all_funcs:
+        tainted = _propagate_taint(func, frozenset())
+        for node in ast.walk(func):
+            if isinstance(node, ast.Return) and node.value is not None:
+                if _is_py_source(node.value) or (tainted and _uses_tainted(node.value, tainted)):
+                    tainted_funcs.add(func.name)
+                    break
+
+    # Merge cross-file tainted functions into the local set
+    frozen_tainted_funcs = frozenset(tainted_funcs) | cross_file_funcs
+
+    # Phase 2: full analysis with inter-procedural taint
     findings: list[Finding] = []
     reported: set[tuple[int, str]] = set()
 
-    for func in ast.walk(tree):
-        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-
-        tainted = _propagate_taint(func)
+    for func in all_funcs:
+        tainted = _propagate_taint(func, frozen_tainted_funcs)
         if not tainted:
             continue
 
@@ -1036,6 +1746,7 @@ def scan_python_ast_taint(path: Path) -> list[Finding]:
                     continue
                 reported.add(key)
                 snippet = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+                cwe, owasp = RULE_META.get(rule_id, ("", ""))
                 findings.append(Finding(
                     file=str(path),
                     line=node.lineno,
@@ -1044,6 +1755,9 @@ def scan_python_ast_taint(path: Path) -> list[Finding]:
                     language="python",
                     message=message + " (AST taint analysis)",
                     code_snippet=snippet[:120],
+                    confidence="HIGH",
+                    cwe=cwe,
+                    owasp=owasp,
                 ))
 
     return findings
@@ -1122,11 +1836,15 @@ def scan_with_regex(path: Path, language: str) -> list[Finding]:
             if any(re.search(sp, line) for sp in skip_pats):
                 continue
 
+            cwe, owasp = RULE_META.get(rule_id, ("", ""))
             findings.append(Finding(
                 file=str(path), line=i,
                 severity=severity, rule_id=rule_id,
                 language=language, message=message,
                 code_snippet=stripped[:120],
+                confidence="LOW",
+                cwe=cwe,
+                owasp=owasp,
             ))
 
     return findings
@@ -1145,12 +1863,16 @@ def scan_python_ast(path: Path) -> list[Finding]:
     class Visitor(ast.NodeVisitor):
         def visit_Assert(self, node):
             snippet = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+            cwe, owasp = RULE_META.get("SEC003", ("", ""))
             findings.append(Finding(
                 file=str(path), line=node.lineno,
                 severity="LOW", rule_id="SEC003",
                 language="python",
                 message="Assert stripped with python -O — don't use for security checks",
                 code_snippet=snippet,
+                confidence="LOW",
+                cwe=cwe,
+                owasp=owasp,
             ))
             self.generic_visit(node)
 
@@ -1158,19 +1880,50 @@ def scan_python_ast(path: Path) -> list[Finding]:
     return findings
 
 
-def scan_file(path: Path) -> list[Finding]:
+def _detect_language(path: Path) -> str | None:
+    """
+    Resolve the scanner language for a file, including IaC formats.
+
+    Resolution order:
+      1. FILENAME_MAP  (Dockerfile, CMakeLists.txt, …)
+      2. EXTENSION_MAP (.py, .js, .go, …)
+      3. Content-based detection for .yml/.yaml → GHA or ignored
+    """
+    lang = FILENAME_MAP.get(path.name.lower())
+    if lang:
+        return lang
+    lang = EXTENSION_MAP.get(path.suffix.lower())
+    if lang and lang != "yaml_generic":
+        return lang
+    # .yml / .yaml: only scan if it looks like a GitHub Actions workflow
+    if path.suffix.lower() in (".yml", ".yaml"):
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            if re.search(r'^on\s*:', content, re.MULTILINE) and re.search(r'^jobs\s*:', content, re.MULTILINE):
+                return "gha"
+        except Exception:
+            pass
+        return None  # plain YAML — no rules defined, skip
+    return None
+
+
+def scan_file(
+    path: Path,
+    taint_window: int = 25,
+    cross_file_funcs: frozenset[str] = frozenset(),
+) -> list[Finding]:
     """
     Run all scan engines for the given file and return deduplicated findings.
 
     Engines (in order, each de-duplicated by (line, rule_id)):
-      1. scan_with_regex   — fast pattern matching with context filtering
-      2. scan_python_ast   — Python AST: assert-statement detection
-      3. scan_python_ast_taint — Python AST: intra-function source→sink taint
-      4. scan_taint        — cross-line sliding-window taint (all languages)
+      1. scan_with_regex       — fast pattern matching with context filtering
+      2. scan_entropy          — Shannon-entropy secret detection (all languages)
+      3. scan_multiline        — multi-line/logical-line injection rules (non-Python)
+      4. scan_python_ast       — Python AST: assert-statement detection
+      5. scan_python_ast_taint — Python AST: intra+inter-procedural + cross-file taint
+      6. scan_taint            — cross-line sliding-window taint (all languages)
     """
-    language = EXTENSION_MAP.get(path.suffix.lower())
-    if not language:
-        language = FILENAME_MAP.get(path.name.lower())
+    language = _detect_language(path)
     if not language:
         return []
 
@@ -1185,64 +1938,1009 @@ def scan_file(path: Path) -> list[Finding]:
                 findings.append(f)
 
     _merge(scan_with_regex(path, language))
+    _merge(scan_entropy(path, language))
+    _merge(scan_multiline(path, language))
 
     if language == "python":
         _merge(scan_python_ast(path))
-        _merge(scan_python_ast_taint(path))
+        _merge(scan_python_ast_taint(path, cross_file_funcs=cross_file_funcs))
 
-    _merge(scan_taint(path, language))
+    _merge(scan_taint(path, language, taint_window=taint_window))
 
     return findings
 
 
+# ── YAML custom rule loader ───────────────────────────────────────────────────
+
+def _load_yaml_rules(rule_files: list[str]) -> None:
+    """
+    Load additional rules from YAML files and merge them into RULES / RULE_META.
+
+    Schema (each file):
+    ┌─────────────────────────────────────────────────────────────┐
+    │ rules:                                                      │
+    │   - id: CUSTOM001                                           │
+    │     language: python   # python|javascript|php|java|go|bash │
+    │                        # |dockerfile|gha|c|build            │
+    │     severity: HIGH     # HIGH | MEDIUM | LOW                │
+    │     pattern: 'regex'   # Python re pattern                  │
+    │     message: "..."     # Human-readable description         │
+    │     cwe: "CWE-89"      # optional                          │
+    │     owasp: "A03:2021"  # optional                          │
+    └─────────────────────────────────────────────────────────────┘
+    """
+    try:
+        import yaml  # type: ignore[import]
+    except ImportError:
+        print("Warning: pyyaml not installed — cannot load custom rules. Run: pip install pyyaml")
+        return
+
+    for rule_file in rule_files:
+        try:
+            with open(rule_file, encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+        except Exception as exc:
+            print(f"Warning: could not load rule file {rule_file!r}: {exc}")
+            continue
+
+        loaded = 0
+        for rule in (data or {}).get("rules", []):
+            rid      = str(rule.get("id", "")).strip()
+            lang     = str(rule.get("language", "")).strip().lower()
+            severity = str(rule.get("severity", "MEDIUM")).strip().upper()
+            pattern  = str(rule.get("pattern", "")).strip()
+            message  = str(rule.get("message", "Custom rule")).strip()
+            cwe      = str(rule.get("cwe", "")).strip()
+            owasp    = str(rule.get("owasp", "")).strip()
+
+            if not rid or not lang or not pattern:
+                print(f"Warning: skipping malformed rule in {rule_file!r}: {rule}")
+                continue
+            RULES.setdefault(lang, []).append((rid, severity, pattern, message))
+            RULE_META.setdefault(rid, (cwe, owasp))
+            loaded += 1
+        print(f"  Loaded {loaded} custom rules from {rule_file}")
+
+
+# ── Diff / incremental scanning ───────────────────────────────────────────────
+
+def _get_diff_files(base_ref: str, root: Path) -> list[Path]:
+    """
+    Return paths of files changed relative to *base_ref* using git diff.
+    Falls back to an empty list with a warning if git is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", base_ref],
+            capture_output=True, text=True, cwd=root,
+        )
+        if result.returncode != 0:
+            # Try staged changes instead
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "--cached"],
+                capture_output=True, text=True, cwd=root,
+            )
+        files: list[Path] = []
+        for name in result.stdout.splitlines():
+            name = name.strip()
+            if not name:
+                continue
+            p = (root / name).resolve()
+            if p.is_file():
+                files.append(p)
+        return files
+    except Exception as exc:
+        print(f"Warning: git diff failed: {exc}")
+        return []
+
+
+# ── AI-assisted finding triage ────────────────────────────────────────────────
+
+def _ai_explain_findings(
+    findings: list[Finding],
+    model: str = "claude-haiku-4-5-20251001",
+) -> None:
+    """
+    Use the Anthropic API to generate a plain-English triage note for each
+    HIGH finding, stored in finding.ai_explanation.
+
+    Requires the ANTHROPIC_API_KEY environment variable.
+    """
+    try:
+        import anthropic  # type: ignore[import]
+    except ImportError:
+        print("Warning: anthropic package not installed — run: pip install anthropic")
+        return
+
+    high = [f for f in findings if f.severity == "HIGH"]
+    if not high:
+        return
+
+    client = anthropic.Anthropic()
+    print(f"  AI triage: analysing {len(high)} HIGH finding(s) with {model} …")
+
+    seen: set[tuple[str, int, str]] = set()
+    for f in high:
+        key = (f.file, f.line, f.rule_id)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        prompt = (
+            "You are a security expert reviewing a SAST tool finding. Be concise.\n\n"
+            f"Rule    : {f.rule_id} | Severity: {f.severity}\n"
+            f"CWE/OWASP: {f.cwe} / {f.owasp}\n"
+            f"File    : {f.file} line {f.line}\n"
+            f"Message : {f.message}\n"
+            f"Snippet : {f.code_snippet}\n\n"
+            "In 2-3 sentences answer: "
+            "(1) Is this likely a true positive or false positive? "
+            "(2) What is the real exploitability risk? "
+            "(3) What is the recommended fix?"
+        )
+        try:
+            resp = client.messages.create(
+                model=model,
+                max_tokens=250,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            explanation = resp.content[0].text.strip()
+        except Exception as exc:
+            explanation = f"[AI triage unavailable: {exc}]"
+
+        # Apply to all findings with the same key
+        for f2 in findings:
+            if (f2.file, f2.line, f2.rule_id) == key:
+                f2.ai_explanation = explanation
+
+
+# ── Multi-line / logical-line normalization ───────────────────────────────────
+
+_OPEN_BRACKETS  = frozenset("([{")
+_CLOSE_BRACKETS = frozenset(")]}")
+
+def _logical_lines(source: str, language: str) -> list[tuple[int, str]]:
+    """
+    Join continuation lines into single logical lines for non-Python languages.
+
+    Returns a list of (start_line_no, joined_text) tuples where line numbers
+    are 1-based and refer to the first physical line of each logical line.
+
+    Strategy:
+    - Track open bracket depth; while depth > 0 join subsequent physical lines.
+    - Also handle explicit line-continuations: backslash at end of line (C/Java/JS)
+      and the pipe-at-start pattern used in some shell scripts.
+    - Python is excluded — its AST engine is already multi-line-aware.
+    """
+    if language == "python":
+        return [(i + 1, ln) for i, ln in enumerate(source.splitlines())]
+
+    physical = source.splitlines()
+    result: list[tuple[int, str]] = []
+    depth   = 0
+    buf     = ""
+    start   = 1
+
+    for i, raw in enumerate(physical):
+        lineno = i + 1
+        stripped = raw.rstrip()
+
+        if not buf:
+            start = lineno
+            buf   = stripped
+        else:
+            buf += " " + stripped.lstrip()
+
+        for ch in stripped:
+            if ch in _OPEN_BRACKETS:
+                depth += 1
+            elif ch in _CLOSE_BRACKETS:
+                depth = max(0, depth - 1)
+
+        cont = depth > 0 or stripped.endswith("\\")
+        if not cont:
+            result.append((start, buf))
+            buf   = ""
+            depth = 0
+
+    if buf:
+        result.append((start, buf))
+
+    return result
+
+
+# Injection-class rules to re-run against logical lines (non-Python only)
+_MULTILINE_RULES: dict[str, list[tuple[str, re.Pattern, str, str]]] = {
+    "javascript": [
+        ("SEC004", re.compile(
+            r'(?:query|sql|SQL)\s*[+=]\s*.*(?:SELECT|INSERT|UPDATE|DELETE|WHERE).*\$\{',
+            re.IGNORECASE),
+         "SQL injection via template literal across lines", "HIGH"),
+        ("SEC006", re.compile(
+            r'(?:innerHTML|outerHTML|document\.write)\s*[+=]\s*.*(?:req\.|request\.|params\.|query\.)',
+            re.IGNORECASE),
+         "XSS via multi-line DOM assignment", "HIGH"),
+    ],
+    "php": [
+        ("SEC004", re.compile(
+            r'(?:mysql_query|mysqli_query|PDO)\s*\(.*\$_(GET|POST|REQUEST|COOKIE)',
+            re.IGNORECASE),
+         "SQL injection: user input directly in query across lines", "HIGH"),
+        ("SEC006", re.compile(
+            r'echo\s+.*\$_(GET|POST|REQUEST|COOKIE)',
+            re.IGNORECASE),
+         "XSS: echoing unescaped user input across lines", "HIGH"),
+    ],
+    "java": [
+        ("SEC004", re.compile(
+            r'(?:createQuery|createNativeQuery|executeQuery|prepareStatement)\s*\(.*\+\s*(?:request\.getParameter|req\.getParam)',
+            re.IGNORECASE),
+         "SQL injection via concatenation across lines", "HIGH"),
+    ],
+    "go": [
+        ("SEC004", re.compile(
+            r'(?:db\.Query|db\.Exec|DB\.Raw)\s*\(.*\+\s*\w',
+            re.IGNORECASE),
+         "SQL injection via string concatenation across lines", "HIGH"),
+    ],
+}
+
+
+def scan_multiline(path: Path, language: str) -> list[Finding]:
+    """
+    Apply injection rules to normalized logical lines to catch patterns that
+    span multiple physical lines (e.g., a SQL query assembled via concatenation).
+    Only runs for non-Python languages where we have explicit multi-line rules.
+    """
+    ml_rules = _MULTILINE_RULES.get(language)
+    if not ml_rules:
+        return []
+
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    logical = _logical_lines(source, language)
+    findings: list[Finding] = []
+    seen: set[tuple[int, str]] = set()
+
+    for lineno, text in logical:
+        for rule_id, pattern, message, severity in ml_rules:
+            if not pattern.search(text):
+                continue
+            key = (lineno, rule_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            cwe, owasp = RULE_META.get(rule_id, ("", ""))
+            findings.append(Finding(
+                file=str(path),
+                line=lineno,
+                severity=severity,
+                rule_id=rule_id + "M",
+                language=language,
+                message=message,
+                code_snippet=text[:120],
+                confidence="MEDIUM",
+                cwe=cwe,
+                owasp=owasp,
+            ))
+
+    return findings
+
+
+# ── Cross-file taint tracking (Python) ───────────────────────────────────────
+
+def _build_cross_file_taint_map(files: list[Path]) -> frozenset[str]:
+    """
+    Pre-pass over all Python files: collect names of functions/methods whose
+    return values are tainted by user-controlled sources.
+
+    Returns a frozenset of bare function names.  These are passed into
+    scan_python_ast_taint() as additional taint sources so that, if file A
+    defines get_username() which returns request.args["user"], and file B
+    calls get_username() and feeds the result to cursor.execute(), file B
+    will report a SQL-injection finding.
+    """
+    tainted_funcs: set[str] = set()
+
+    for path in files:
+        if not path.suffix == ".py":
+            continue
+        try:
+            source = path.read_text(encoding="utf-8", errors="ignore")
+            tree   = ast.parse(source)
+        except (SyntaxError, OSError):
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            tainted = _propagate_taint(node, frozenset())
+            for child in ast.walk(node):
+                if isinstance(child, ast.Return) and child.value is not None:
+                    if _is_py_source(child.value) or (tainted and _uses_tainted(child.value, tainted)):
+                        tainted_funcs.add(node.name)
+                        break
+
+    return frozenset(tainted_funcs)
+
+
+# ── SCA — Software Composition Analysis via OSV ───────────────────────────────
+
+import urllib.request
+import urllib.error
+
+_OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
+
+_SCA_RULE_META = ("CWE-1395", "A06:2021")
+RULE_META["SCA001"] = _SCA_RULE_META
+
+
+def _query_osv_batch(packages: list[dict]) -> list[list[dict]]:
+    """
+    Query OSV /v1/querybatch for a list of {ecosystem, name, version} dicts.
+    Returns a list of vuln-lists, one per package (same order).
+    """
+    if not packages:
+        return []
+
+    queries = []
+    for pkg in packages:
+        q: dict = {"package": {"name": pkg["name"], "ecosystem": pkg["ecosystem"]}}
+        if pkg.get("version"):
+            q["version"] = pkg["version"]
+        queries.append(q)
+
+    body = json.dumps({"queries": queries}).encode()
+    req  = urllib.request.Request(
+        _OSV_BATCH_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError):
+        return [[] for _ in packages]
+
+    results = data.get("results", [])
+    out: list[list[dict]] = []
+    for r in results:
+        out.append(r.get("vulns", []))
+    while len(out) < len(packages):
+        out.append([])
+    return out
+
+
+def _parse_requirements(path: Path) -> list[dict]:
+    """Parse requirements.txt / requirements-*.txt into [{name, version, line}]."""
+    pkgs = []
+    for i, raw in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        # Strip extras and environment markers
+        line = re.sub(r"\[.*?\]", "", line)
+        line = line.split(";")[0].strip()
+        m = re.match(r"^([A-Za-z0-9_\-\.]+)\s*(?:[=~!<>]+\s*([\w\.]+))?", line)
+        if m:
+            pkgs.append({"name": m.group(1), "version": m.group(2) or "", "line": i, "ecosystem": "PyPI"})
+    return pkgs
+
+
+def _parse_package_json(path: Path) -> list[dict]:
+    """Parse package.json dependencies into [{name, version, line}]."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return []
+    pkgs = []
+    for section in ("dependencies", "devDependencies", "peerDependencies"):
+        for name, ver in (data.get(section) or {}).items():
+            ver_clean = re.sub(r"[^0-9\.]", "", ver).strip(".")
+            pkgs.append({"name": name, "version": ver_clean, "line": 1, "ecosystem": "npm"})
+    return pkgs
+
+
+def _parse_go_mod(path: Path) -> list[dict]:
+    """Parse go.mod require blocks into [{name, version, line}]."""
+    pkgs = []
+    for i, raw in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+        m = re.match(r"^\s*require\s+(\S+)\s+(v[\w\.\-]+)", raw)
+        if not m:
+            m = re.match(r"^\s+(\S+)\s+(v[\w\.\-]+)", raw)
+        if m:
+            ver = m.group(2).lstrip("v")
+            pkgs.append({"name": m.group(1), "version": ver, "line": i, "ecosystem": "Go"})
+    return pkgs
+
+
+def _parse_pom_xml(path: Path) -> list[dict]:
+    """Parse pom.xml <dependency> blocks into [{name, version, line}]."""
+    import xml.etree.ElementTree as ET
+    pkgs = []
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        ns   = re.match(r"\{.*\}", root.tag)
+        ns   = ns.group(0) if ns else ""
+        for dep in root.iter(f"{ns}dependency"):
+            group    = (dep.find(f"{ns}groupId")    or ET.Element("x")).text or ""
+            artifact = (dep.find(f"{ns}artifactId") or ET.Element("x")).text or ""
+            ver_el   = dep.find(f"{ns}version")
+            version  = (ver_el.text or "").strip("${}") if ver_el is not None else ""
+            if artifact:
+                name = f"{group}:{artifact}" if group else artifact
+                pkgs.append({"name": name, "version": version, "line": 1, "ecosystem": "Maven"})
+    except Exception:
+        pass
+    return pkgs
+
+
+def scan_sca(root: Path, exclude: list[str] | None = None) -> list[Finding]:
+    """
+    Software Composition Analysis: parse dependency manifests and query the OSV
+    database for known CVEs / GHSAs.
+
+    Manifest files detected:
+      requirements*.txt  → PyPI
+      package.json       → npm
+      go.mod             → Go
+      pom.xml            → Maven
+    """
+    exclude = exclude or []
+    manifest_parsers = [
+        (re.compile(r"requirements.*\.txt$"), _parse_requirements),
+        (re.compile(r"package\.json$"),       _parse_package_json),
+        (re.compile(r"go\.mod$"),             _parse_go_mod),
+        (re.compile(r"pom\.xml$"),            _parse_pom_xml),
+    ]
+
+    # Collect all manifests
+    manifests: list[tuple[Path, callable]] = []
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        if any(ex in f.parts for ex in exclude):
+            continue
+        for pattern, parser in manifest_parsers:
+            if pattern.search(f.name):
+                manifests.append((f, parser))
+                break
+
+    if not manifests:
+        return []
+
+    # Parse each manifest and batch-query OSV
+    findings: list[Finding] = []
+
+    for manifest_path, parser in manifests:
+        try:
+            pkgs = parser(manifest_path)
+        except Exception:
+            pkgs = []
+        if not pkgs:
+            continue
+
+        print(f"  SCA: checking {len(pkgs)} package(s) in {manifest_path.name} …")
+        vuln_lists = _query_osv_batch(pkgs)
+
+        for pkg, vulns in zip(pkgs, vuln_lists):
+            for vuln in vulns[:3]:  # cap at 3 CVEs per package to avoid noise
+                vid      = vuln.get("id", "UNKNOWN")
+                summary  = vuln.get("summary", "Known vulnerability")
+                severity = "HIGH"
+                # Try to derive severity from CVSS if available
+                for sev_info in vuln.get("severity", []):
+                    score_str = sev_info.get("score", "")
+                    m = re.search(r"CVSS:[\d\.]+/.*?/S(?:core)?:(\d+\.?\d*)", score_str)
+                    if not m:
+                        m = re.search(r"(\d+\.\d+)", score_str)
+                    if m:
+                        score = float(m.group(1))
+                        if score >= 7.0:
+                            severity = "HIGH"
+                        elif score >= 4.0:
+                            severity = "MEDIUM"
+                        else:
+                            severity = "LOW"
+                        break
+
+                ver_info = f" {pkg['version']}" if pkg.get("version") else ""
+                ecosystem = pkg.get("ecosystem", "")
+                message = (
+                    f"[SCA] {ecosystem} package '{pkg['name']}'{ver_info} "
+                    f"has known vulnerability {vid}: {summary}"
+                )
+                findings.append(Finding(
+                    file=str(manifest_path),
+                    line=pkg["line"],
+                    severity=severity,
+                    rule_id="SCA001",
+                    language="sca",
+                    message=message[:300],
+                    code_snippet=f"{pkg['name']}{ver_info}",
+                    confidence="HIGH",
+                    cwe="CWE-1395",
+                    owasp="A06:2021",
+                ))
+
+    return findings
+
+
+# ── Parallel scanning ─────────────────────────────────────────────────────────
+
+# scan_python_ast_taint uses a module-level set that is read-only after the
+# cross-file pre-pass, so thread safety is fine.
+_print_lock = threading.Lock()
+
+
+def _scan_file_worker(
+    path: Path,
+    taint_window: int,
+    cross_file_funcs: frozenset[str],
+) -> list[Finding]:
+    return scan_file(path, taint_window=taint_window, cross_file_funcs=cross_file_funcs)
+
+
+def scan_files_parallel(
+    files: list[Path],
+    taint_window: int = 25,
+    cross_file_funcs: frozenset[str] = frozenset(),
+    jobs: int = 4,
+) -> list[Finding]:
+    """
+    Scan a list of files in parallel using a thread pool.
+
+    Python's GIL means I/O-bound work (file reads, regex) gets real concurrency
+    here; AST parsing also releases the GIL for most operations.
+    """
+    results: list[Finding] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = {
+            pool.submit(_scan_file_worker, f, taint_window, cross_file_funcs): f
+            for f in files
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                results.extend(fut.result())
+            except Exception as exc:
+                with _print_lock:
+                    print(f"  Warning: error scanning {futures[fut]}: {exc}")
+    return results
+
+
+# ── Baseline suppression ──────────────────────────────────────────────────────
+
+def _finding_fingerprint(f: Finding) -> str:
+    """Stable key that identifies a finding independent of line drift."""
+    return f"{f.rule_id}:{f.file}:{f.code_snippet[:80]}"
+
+
+def load_baseline(baseline_path: str) -> set[str]:
+    """Load a baseline file and return the set of known finding fingerprints."""
+    p = Path(baseline_path)
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return set(data.get("fingerprints", []))
+    except Exception:
+        return set()
+
+
+def save_baseline(findings: list[Finding], baseline_path: str) -> None:
+    """Write current findings as the new baseline (suppressed in future runs)."""
+    fingerprints = sorted({_finding_fingerprint(f) for f in findings})
+    data = {
+        "version": 1,
+        "count": len(fingerprints),
+        "fingerprints": fingerprints,
+    }
+    Path(baseline_path).write_text(json.dumps(data, indent=2))
+    print(f"  Baseline saved: {len(fingerprints)} finding(s) → {baseline_path}")
+
+
+def filter_baseline(findings: list[Finding], known: set[str]) -> tuple[list[Finding], int]:
+    """
+    Remove findings whose fingerprint is in the baseline.
+    Returns (new_findings, suppressed_count).
+    """
+    new, suppressed = [], 0
+    for f in findings:
+        if _finding_fingerprint(f) in known:
+            suppressed += 1
+        else:
+            new.append(f)
+    return new, suppressed
+
+
+# ── Git history secret scanning ───────────────────────────────────────────────
+
+_HISTORY_RULE_META = ("CWE-798", "A07:2021")
+RULE_META["SEC001H"] = _HISTORY_RULE_META
+
+# Reuse the entropy scanner; patches are plain text so we parse the diff hunks
+_DIFF_FILE_RE   = re.compile(r"^diff --git a/(.+) b/\1")
+_DIFF_HUNK_RE   = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_DIFF_ADDED_RE  = re.compile(r"^\+(?!\+\+)")  # added lines start with +, not +++
+
+
+def scan_git_history(
+    root: Path,
+    max_commits: int = 100,
+    since: str = "",
+) -> list[Finding]:
+    """
+    Walk the last `max_commits` commits in the git repo at `root`, extract
+    added lines from each patch, and apply entropy + known-prefix secret
+    detection to catch credentials committed in the past.
+
+    Returns Finding objects with:
+      file    = path as it appeared in the commit
+      line    = line number within the file at that commit
+      rule_id = SEC001H
+      message = includes the commit hash
+    """
+    cmd = ["git", "-C", str(root), "log",
+           "--all", "--oneline", "--no-merges",
+           f"-{max_commits}"]
+    if since:
+        cmd += [f"--since={since}"]
+
+    try:
+        log = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
+    except subprocess.CalledProcessError:
+        return []
+
+    commits = [line.split(" ", 1)[0] for line in log.splitlines() if line.strip()]
+    if not commits:
+        return []
+
+    print(f"  History scan: inspecting {len(commits)} commit(s) …")
+    findings: list[Finding] = []
+    seen: set[tuple[str, str, int]] = set()
+
+    for sha in commits:
+        try:
+            patch = subprocess.check_output(
+                ["git", "-C", str(root), "show", "--unified=0", "--no-color", sha],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="ignore",
+            )
+        except subprocess.CalledProcessError:
+            continue
+
+        cur_file = ""
+        cur_line = 0
+
+        for raw in patch.splitlines():
+            m = _DIFF_FILE_RE.match(raw)
+            if m:
+                cur_file = m.group(1)
+                cur_line = 0
+                continue
+
+            m = _DIFF_HUNK_RE.match(raw)
+            if m:
+                cur_line = int(m.group(1))
+                continue
+
+            if not _DIFF_ADDED_RE.match(raw):
+                continue
+
+            added_text = raw[1:]  # strip leading +
+            cur_line  += 1
+
+            # Skip lines that are clearly not secrets
+            stripped = added_text.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("//"):
+                continue
+
+            # Check for known secret prefixes first (fast path)
+            hit_prefix = any(pf in added_text for pf in _SECRET_PREFIXES)
+
+            # Extract string literals and check entropy
+            secret_val = ""
+            for m2 in _STRING_LITERAL_RE.finditer(added_text):
+                val = m2.group(1) or m2.group(2)
+                if _looks_like_secret(val):
+                    secret_val = val
+                    break
+
+            if not hit_prefix and not secret_val:
+                continue
+
+            key = (sha, cur_file, cur_line)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if hit_prefix and not secret_val:
+                # Flag the whole line (known-prefix pattern)
+                snippet = stripped[:100]
+                msg = f"Possible hardcoded secret in git history (commit {sha[:8]})"
+            else:
+                snippet = secret_val[:100]
+                msg = (f"High-entropy string in git history (commit {sha[:8]}) "
+                       f"— possible leaked credential")
+
+            findings.append(Finding(
+                file=cur_file,
+                line=cur_line,
+                severity="HIGH",
+                rule_id="SEC001H",
+                language="secret",
+                message=msg,
+                code_snippet=snippet,
+                confidence="MEDIUM",
+                cwe="CWE-798",
+                owasp="A07:2021",
+            ))
+
+    return findings
+
+
+_CONFIDENCE_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+_SEVERITY_TO_SARIF = {"HIGH": "error", "MEDIUM": "warning", "LOW": "note"}
+
+
+def _to_sarif(findings: list[Finding], scan_path: str) -> dict:
+    """
+    Convert a list of Finding objects to a SARIF 2.1.0 dict.
+    """
+    # Deduplicate rules by rule_id, using first occurrence
+    seen_rules: dict[str, dict] = {}
+    for f in findings:
+        if f.rule_id not in seen_rules:
+            cwe_num = f.cwe.replace("CWE-", "") if f.cwe else ""
+            help_uri = (
+                f"https://cwe.mitre.org/data/definitions/{cwe_num}.html"
+                if cwe_num else ""
+            )
+            seen_rules[f.rule_id] = {
+                "id": f.rule_id,
+                "name": f.rule_id,
+                "shortDescription": {"text": f.message},
+                "helpUri": help_uri,
+                "properties": {
+                    "tags": ["security"],
+                    "cwe": f.cwe,
+                    "owasp": f.owasp,
+                },
+            }
+
+    results = []
+    for f in findings:
+        results.append({
+            "ruleId": f.rule_id,
+            "level": _SEVERITY_TO_SARIF.get(f.severity, "note"),
+            "message": {"text": f.message},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {
+                        "uri": f.file,
+                        "uriBaseId": "%SRCROOT%",
+                    },
+                    "region": {"startLine": f.line},
+                }
+            }],
+            "properties": {
+                "confidence": f.confidence,
+                "language": f.language,
+                "cwe": f.cwe,
+                "owasp": f.owasp,
+            },
+        })
+
+    return {
+        "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "git-better-scanner",
+                    "version": "1.0.0",
+                    "rules": list(seen_rules.values()),
+                }
+            },
+            "results": results,
+        }],
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Multi-language vulnerability scanner")
-    parser.add_argument("--path",    default=".",              help="File or directory to scan")
+    parser = argparse.ArgumentParser(
+        description="Multi-language vulnerability scanner",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Full scan, JSON output
+  python vuln_scanner.py --path ./src --output report.json
+
+  # SARIF output for GitHub Advanced Security
+  python vuln_scanner.py --path . --format sarif --output results.sarif
+
+  # Incremental scan — only files changed since last commit
+  python vuln_scanner.py --path . --diff --base-ref HEAD~1
+
+  # Load custom YAML rules
+  python vuln_scanner.py --path ./src --rules rules/custom.yaml
+
+  # AI-assisted triage of HIGH findings (requires ANTHROPIC_API_KEY)
+  python vuln_scanner.py --path ./src --ai-explain
+""",
+    )
+    parser.add_argument("--path",    default=".",  help="File or directory to scan")
     parser.add_argument("--output",  default="scan-report.json")
     parser.add_argument("--exclude", nargs="*",
                         default=["venv", ".venv", "node_modules", "__pycache__", "dist", "build"])
+    parser.add_argument("--taint-window", type=int, default=25,
+                        help="Lines to look back for taint sources (default: 25)")
+    parser.add_argument("--format", choices=["json", "sarif"], default="json",
+                        help="Output format: json (default) or sarif")
+    parser.add_argument("--min-confidence", choices=["LOW", "MEDIUM", "HIGH"], default="LOW",
+                        help="Minimum confidence level for findings (default: LOW)")
+    # New: diff / incremental scanning
+    parser.add_argument("--diff", action="store_true",
+                        help="Only scan files changed relative to --base-ref (git diff)")
+    parser.add_argument("--base-ref", default="HEAD~1", metavar="REF",
+                        help="Git ref to diff against when --diff is used (default: HEAD~1)")
+    # New: YAML custom rules
+    parser.add_argument("--rules", nargs="*", metavar="FILE",
+                        help="YAML rule files to load in addition to built-in rules")
+    # New: AI-assisted triage
+    parser.add_argument("--ai-explain", action="store_true",
+                        help="Use Anthropic API to triage HIGH findings (requires ANTHROPIC_API_KEY)")
+    parser.add_argument("--ai-model", default="claude-haiku-4-5-20251001", metavar="MODEL",
+                        help="Anthropic model for AI triage (default: claude-haiku-4-5-20251001)")
+    # New: SCA
+    parser.add_argument("--no-sca", action="store_true",
+                        help="Skip Software Composition Analysis (OSV network calls)")
+    # New: parallel scanning
+    parser.add_argument("--jobs", type=int, default=4, metavar="N",
+                        help="Parallel scan workers (default: 4)")
+    # New: baseline suppression
+    parser.add_argument("--baseline", metavar="FILE",
+                        help="Suppress findings present in this baseline file")
+    parser.add_argument("--update-baseline", metavar="FILE",
+                        help="After scanning, write all findings as the new baseline")
+    # New: git history secret scanning
+    parser.add_argument("--scan-history", action="store_true",
+                        help="Scan git commit history for committed secrets")
+    parser.add_argument("--history-commits", type=int, default=100, metavar="N",
+                        help="Number of commits to inspect (default: 100)")
+    parser.add_argument("--history-since", default="", metavar="DATE",
+                        help="Only scan commits after this date, e.g. '2024-01-01'")
+
     args = parser.parse_args()
 
-    root = Path(args.path)
+    # Load custom YAML rules before building the file list
+    if args.rules:
+        _load_yaml_rules(args.rules)
 
-    if root.is_file():
-        py_files = [root] if root.suffix in EXTENSION_MAP else []
+    root = Path(args.path).resolve()
+
+    # Determine the file list
+    if args.diff:
+        # Incremental: only changed files
+        scan_files = _get_diff_files(args.base_ref, root)
+        # Apply extension filter and exclude list
+        scan_files = [
+            f for f in scan_files
+            if _detect_language(f) is not None
+            and not any(ex in f.parts for ex in (args.exclude or []))
+        ]
+        print(f"  Diff mode: {len(scan_files)} changed file(s) relative to {args.base_ref}")
+    elif root.is_file():
+        scan_files = [root] if _detect_language(root) is not None else []
     elif root.is_dir():
-        py_files = [
+        scan_files = [
             f for f in root.rglob("*")
             if f.is_file()
-            and f.suffix in EXTENSION_MAP
-            and not any(ex in f.parts for ex in args.exclude)
+            and _detect_language(f) is not None
+            and not any(ex in f.parts for ex in (args.exclude or []))
         ]
     else:
         print(f"Error: {root} is not a valid file or directory")
         sys.exit(1)
 
-    all_findings = []
-    for f in py_files:
-        all_findings.extend(scan_file(f))
+    # Cross-file taint pre-pass (Python only) — build set of tainted function names
+    python_files = [f for f in scan_files if f.suffix == ".py"]
+    cross_file_funcs: frozenset[str] = frozenset()
+    if python_files:
+        print(f"  Cross-file taint: analysing {len(python_files)} Python file(s) …")
+        cross_file_funcs = _build_cross_file_taint_map(python_files)
+        if cross_file_funcs:
+            print(f"  Cross-file taint: {len(cross_file_funcs)} taint-source function(s) found across files")
 
-    by_lang = {}
+    # Parallel file scanning
+    jobs = max(1, args.jobs)
+    if jobs > 1 and len(scan_files) > 1:
+        print(f"  Scanning {len(scan_files)} file(s) with {jobs} worker(s) …")
+        all_findings: list[Finding] = scan_files_parallel(
+            scan_files, taint_window=args.taint_window,
+            cross_file_funcs=cross_file_funcs, jobs=jobs,
+        )
+    else:
+        all_findings = []
+        for f in scan_files:
+            all_findings.extend(scan_file(f, taint_window=args.taint_window,
+                                          cross_file_funcs=cross_file_funcs))
+
+    # SCA scan (dependency manifests → OSV API)
+    if not args.no_sca and root.is_dir():
+        all_findings.extend(scan_sca(root, exclude=args.exclude))
+
+    # Git history secret scanning
+    if args.scan_history:
+        history_root = root if root.is_dir() else root.parent
+        all_findings.extend(
+            scan_git_history(history_root,
+                             max_commits=args.history_commits,
+                             since=args.history_since)
+        )
+
+    # Apply --min-confidence filter
+    min_conf_level = _CONFIDENCE_ORDER.get(args.min_confidence, 0)
+    all_findings = [
+        f for f in all_findings
+        if _CONFIDENCE_ORDER.get(f.confidence, 0) >= min_conf_level
+    ]
+
+    # Baseline suppression — load known fingerprints and filter them out
+    suppressed = 0
+    if args.baseline:
+        known = load_baseline(args.baseline)
+        if known:
+            all_findings, suppressed = filter_baseline(all_findings, known)
+            print(f"  Baseline: {suppressed} known finding(s) suppressed, "
+                  f"{len(all_findings)} new finding(s) remain")
+
+    # AI-assisted triage of HIGH findings
+    if args.ai_explain:
+        _ai_explain_findings(all_findings, model=args.ai_model)
+
+    by_lang: dict[str, list[Finding]] = {}
     for f in all_findings:
         by_lang.setdefault(f.language, []).append(f)
 
-    report = {
-        "total":    len(all_findings),
-        "high":     sum(1 for f in all_findings if f.severity == "HIGH"),
-        "medium":   sum(1 for f in all_findings if f.severity == "MEDIUM"),
-        "low":      sum(1 for f in all_findings if f.severity == "LOW"),
-        "by_language": {lang: len(findings) for lang, findings in by_lang.items()},
-        "findings": [asdict(f) for f in all_findings],
-    }
+    if args.format == "sarif":
+        output_data = _to_sarif(all_findings, args.path)
+        Path(args.output).write_text(json.dumps(output_data, indent=2))
+    else:
+        report = {
+            "total":       len(all_findings),
+            "high":        sum(1 for f in all_findings if f.severity == "HIGH"),
+            "medium":      sum(1 for f in all_findings if f.severity == "MEDIUM"),
+            "low":         sum(1 for f in all_findings if f.severity == "LOW"),
+            "suppressed":  suppressed,
+            "by_language": {lang: len(fs) for lang, fs in by_lang.items()},
+            "findings":    [asdict(f) for f in all_findings],
+        }
+        Path(args.output).write_text(json.dumps(report, indent=2))
 
-    Path(args.output).write_text(json.dumps(report, indent=2))
+    # Update baseline if requested (snapshot current findings for future runs)
+    if args.update_baseline:
+        save_baseline(all_findings, args.update_baseline)
+
+    total = len(all_findings)
+    high  = sum(1 for f in all_findings if f.severity == "HIGH")
+    med   = sum(1 for f in all_findings if f.severity == "MEDIUM")
+    low   = sum(1 for f in all_findings if f.severity == "LOW")
     print(f"\n{'─'*50}")
-    print(f"  Scan complete — {report['total']} findings")
-    print(f"  HIGH={report['high']}  MEDIUM={report['medium']}  LOW={report['low']}")
-    print(f"  By language: {report['by_language']}")
+    print(f"  Scan complete — {total} finding(s)"
+          + (f"  ({suppressed} suppressed by baseline)" if suppressed else ""))
+    print(f"  HIGH={high}  MEDIUM={med}  LOW={low}")
+    print(f"  By language: { {lang: len(flist) for lang, flist in by_lang.items()} }")
     print(f"{'─'*50}\n")
 
-    sys.exit(1 if report["high"] > 0 else 0)
+    sys.exit(1 if high > 0 else 0)
 
 
 if __name__ == "__main__":

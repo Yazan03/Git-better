@@ -44,6 +44,8 @@ class Finding(Base):
     language = Column(String(32), nullable=False, index=True)
     message = Column(Text, nullable=False)
     code_snippet = Column(Text, default="")
+    confidence = Column(String(16), default="LOW")
+    ai_explanation = Column(Text, default="")
 
     report = relationship("Report", back_populates="findings")
 
@@ -64,15 +66,22 @@ class User(Base):
 def _migrate(engine):
     """Idempotent column adds for SQLite — no Alembic dependency."""
     with engine.begin() as conn:
-        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(reports)"))}
-        if "parent_id" not in cols:
+        # reports table
+        report_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(reports)"))}
+        if "parent_id" not in report_cols:
             conn.execute(text("ALTER TABLE reports ADD COLUMN parent_id INTEGER"))
-        if "zip_filename" not in cols:
+        if "zip_filename" not in report_cols:
             conn.execute(text("ALTER TABLE reports ADD COLUMN zip_filename VARCHAR(255)"))
-        if "repo_url" not in cols:
+        if "repo_url" not in report_cols:
             conn.execute(text("ALTER TABLE reports ADD COLUMN repo_url VARCHAR(512)"))
-        if "repo_ref" not in cols:
+        if "repo_ref" not in report_cols:
             conn.execute(text("ALTER TABLE reports ADD COLUMN repo_ref VARCHAR(255)"))
+        # findings table
+        finding_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(findings)"))}
+        if "confidence" not in finding_cols:
+            conn.execute(text("ALTER TABLE findings ADD COLUMN confidence VARCHAR(16) DEFAULT 'LOW'"))
+        if "ai_explanation" not in finding_cols:
+            conn.execute(text("ALTER TABLE findings ADD COLUMN ai_explanation TEXT DEFAULT ''"))
 
 
 def make_session(db_path: str):

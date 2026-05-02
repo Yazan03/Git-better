@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CI Build Dashboard</title>
+  <style>
+    /* ── theme tokens ──────────────────────────────────────────────────── */
+    :root {
+      --bg:           #0d1117;
+      --surface:      #161b22;
+      --surface2:     #1c2129;
+      --border:       #30363d;
+      --text:         #e6edf3;
+      --text-muted:   #7d8590;
+      --text-subtle:  #484f58;
+      --accent:       #388bfd;
+      --success:      #3fb950;
+      --failure:      #f85149;
+      --cancelled:    #d29922;
+      --radius:       8px;
+      --font:         -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono:         "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    [data-theme="light"] {
+      --bg:         #f6f8fa;
+      --surface:    #ffffff;
+      --surface2:   #f6f8fa;
+      --border:     #d0d7de;
+      --text:       #1f2328;
+      --text-muted: #57606a;
+      --text-subtle:#6e7781;
+    }
+
+    /* ── reset ─────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── layout ─────────────────────────────────────────────────────────── */
+    .page { max-width: 1280px; margin: 0 auto; padding: 0 24px 64px; }
+
+    /* ── header ─────────────────────────────────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 0 24px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 32px;
+      gap: 12px;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+    .header-title { font-size: 20px; font-weight: 600; }
+    .refresh-badge {
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2px 10px;
+    }
+    .header-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .user-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .role-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 7px;
+      border-radius: 10px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .role-badge.admin  { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+    .role-badge.member { background: color-mix(in srgb, var(--text-muted) 15%, transparent); color: var(--text-muted); }
+    .btn {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      border-radius: var(--radius);
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 13px;
+      text-decoration: none;
+      white-space: nowrap;
+      display: inline-block;
+      line-height: 1.4;
+    }
+    .btn:hover { background: var(--surface2); color: var(--text); text-decoration: none; }
+
+    /* ── summary cards ──────────────────────────────────────────────────── */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 36px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+    }
+    .card-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .card-value { font-size: 28px; font-weight: 700; line-height: 1; }
+    .card-sub { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+    .card-value.success   { color: var(--success); }
+    .card-value.failure   { color: var(--failure); }
+    .card-value.cancelled { color: var(--cancelled); }
+
+    /* ── filters ────────────────────────────────────────────────────────── */
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    .filters label { font-size: 13px; color: var(--text-muted); }
+    .filters select, .filters input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: 6px 10px;
+      font-size: 13px;
+      outline: none;
+    }
+    .filters select:focus, .filters input:focus { border-color: var(--accent); }
+    .filter-group { display: flex; align-items: center; gap: 6px; }
+    .filter-count { font-size: 12px; color: var(--text-muted); margin-left: auto; }
+
+    /* ── table ──────────────────────────────────────────────────────────── */
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { background: var(--surface2); border-bottom: 1px solid var(--border); }
+    th {
+      text-align: left;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--text-muted);
+      padding: 10px 16px;
+      white-space: nowrap;
+    }
+    td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: var(--surface2); }
+
+    .col-branch { max-width: 140px; }
+    .col-commit { max-width: 220px; }
+    .col-author, .col-owner { max-width: 110px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .col-dur, .col-time { white-space: nowrap; }
+
+    .branch-tag {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 12px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 7px;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sha { font-family: var(--mono); font-size: 12px; color: var(--text-muted); }
+    .commit-msg {
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 200px;
+      display: block;
+    }
+
+    /* status badge */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 20px;
+      padding: 2px 10px;
+    }
+    .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; }
+    .badge.success   { color: var(--success);   background: color-mix(in srgb, var(--success)   15%, transparent); }
+    .badge.success::before   { background: var(--success); }
+    .badge.failure   { color: var(--failure);   background: color-mix(in srgb, var(--failure)   15%, transparent); }
+    .badge.failure::before   { background: var(--failure); }
+    .badge.cancelled { color: var(--cancelled); background: color-mix(in srgb, var(--cancelled) 15%, transparent); }
+    .badge.cancelled::before { background: var(--cancelled); }
+
+    .tests { font-size: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .tests .t-pass { color: var(--success); }
+    .tests .t-fail { color: var(--failure); }
+    .tests .t-skip { color: var(--text-muted); }
+
+    .empty-row td { text-align: center; padding: 48px; color: var(--text-muted); font-size: 14px; }
+
+    /* ── pagination ─────────────────────────────────────────────────────── */
+    .pagination { display: flex; justify-content: center; align-items: center; gap: 8px; margin-top: 20px; }
+    .page-btn {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: 5px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .page-btn:hover:not(:disabled) { background: var(--surface2); }
+    .page-btn:disabled { opacity: .4; cursor: default; }
+    .page-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .page-info { font-size: 13px; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <header class="header">
+    <div class="header-left">
+      <span class="header-title">CI Build Dashboard</span>
+      <span class="refresh-badge" id="refresh-badge">refreshes in 30s</span>
+    </div>
+    <div class="header-right" id="header-right"></div>
+  </header>
+
+  <section class="cards" id="cards"></section>
+
+  <div class="filters">
+    <div class="filter-group">
+      <label for="f-branch">Branch</label>
+      <input id="f-branch" type="text" placeholder="all branches" style="width:160px" />
+    </div>
+    <div class="filter-group">
+      <label for="f-status">Status</label>
+      <select id="f-status">
+        <option value="">all statuses</option>
+        <option value="success">success</option>
+        <option value="failure">failure</option>
+        <option value="cancelled">cancelled</option>
+      </select>
+    </div>
+    <span class="filter-count" id="filter-count"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Branch</th>
+          <th>Commit</th>
+          <th>Author</th>
+          <th>Owner</th>
+          <th>Status</th>
+          <th>Tests</th>
+          <th>Duration</th>
+          <th>Time</th>
+          <th>Pipeline</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="pagination" id="pagination"></div>
+
+</div>
+
+<script>
+  /*DATA_PLACEHOLDER*/
+
+  // ── helpers ──────────────────────────────────────────────────────────────
+
+  function fmtDuration(ms) {
+    if (ms == null) return '—';
+    if (ms < 1000) return `${ms}ms`;
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60), rem = s % 60;
+    return rem ? `${m}m ${rem}s` : `${m}m`;
+  }
+
+  function timeAgo(isoStr) {
+    if (!isoStr) return '—';
+    const diff = Date.now() - new Date(isoStr).getTime();
+    const s = Math.floor(diff / 1000);
+    if (s < 60)  return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60)  return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24)  return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  }
+
+  function esc(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ── nav user bar ──────────────────────────────────────────────────────────
+
+  (function renderNav() {
+    const { username, role } = DASHBOARD_DATA.user;
+    const adminLink = role === 'admin'
+      ? `<a class="btn" href="/admin">Admin</a>`
+      : '';
+    document.getElementById('header-right').innerHTML = `
+      <span class="user-chip">
+        ${esc(username)}<span class="role-badge ${esc(role)}">${esc(role)}</span>
+      </span>
+      ${adminLink}
+      <form method="POST" action="/logout" style="display:inline">
+        <button class="btn" type="submit">Sign out</button>
+      </form>
+      <button class="btn" id="theme-btn">Toggle theme</button>
+    `;
+    document.getElementById('theme-btn').addEventListener('click', () => {
+      const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('ci-dash-theme', next);
+    });
+  })();
+
+  // ── summary cards ─────────────────────────────────────────────────────────
+
+  function renderCards(summary) {
+    const { totalBuilds, successRate, avgDuration, lastStatus } = summary;
+    const statusClass = lastStatus || '';
+    const statusLabel = lastStatus ? lastStatus.charAt(0).toUpperCase() + lastStatus.slice(1) : 'N/A';
+    document.getElementById('cards').innerHTML = `
+      <div class="card">
+        <div class="card-label">Total Builds</div>
+        <div class="card-value">${totalBuilds}</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Success Rate (30d)</div>
+        <div class="card-value ${successRate != null && successRate >= 80 ? 'success' : successRate != null && successRate < 50 ? 'failure' : ''}">
+          ${successRate != null ? successRate + '%' : 'N/A'}
+        </div>
+        <div class="card-sub">last 30 days</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Avg Duration</div>
+        <div class="card-value">${fmtDuration(avgDuration)}</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Last Build</div>
+        <div class="card-value ${statusClass}">${statusLabel}</div>
+      </div>
+    `;
+  }
+
+  // ── table ─────────────────────────────────────────────────────────────────
+
+  const PAGE_SIZE = 25;
+  let currentPage = 1;
+  let filteredBuilds = [];
+
+  function applyFilters() {
+    const branch = document.getElementById('f-branch').value.trim().toLowerCase();
+    const status = document.getElementById('f-status').value;
+    filteredBuilds = DASHBOARD_DATA.builds.filter(b => {
+      if (branch && !b.branch.toLowerCase().includes(branch)) return false;
+      if (status && b.status !== status) return false;
+      return true;
+    });
+    currentPage = 1;
+    renderTable();
+  }
+
+  function renderTable() {
+    const total  = filteredBuilds.length;
+    const pages  = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    currentPage  = Math.min(currentPage, pages);
+    const start  = (currentPage - 1) * PAGE_SIZE;
+    const slice  = filteredBuilds.slice(start, start + PAGE_SIZE);
+
+    document.getElementById('filter-count').textContent =
+      total === DASHBOARD_DATA.builds.length
+        ? `${total} builds`
+        : `${total} of ${DASHBOARD_DATA.builds.length} builds`;
+
+    const tbody = document.getElementById('tbody');
+    if (!slice.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="9">No builds match the current filters.</td></tr>';
+      renderPagination(0, 1);
+      return;
+    }
+
+    tbody.innerHTML = slice.map(b => {
+      const sha     = (b.commit.sha || '').slice(0, 7);
+      const msg     = esc(b.commit.message || '');
+      const pipeline = b.pipeline?.url
+        ? `<a href="${esc(b.pipeline.url)}" target="_blank" rel="noopener">${esc(b.pipeline.name || 'view')}</a>`
+        : (b.pipeline?.name ? esc(b.pipeline.name) : '—');
+      const tests   = b.testResults;
+      const hasTests = (tests.passed + tests.failed + tests.skipped) > 0;
+      const testsHtml = hasTests
+        ? `<div class="tests">
+             <span class="t-pass" title="passed">✓ ${tests.passed}</span>
+             ${tests.failed  ? `<span class="t-fail" title="failed">✗ ${tests.failed}</span>` : ''}
+             ${tests.skipped ? `<span class="t-skip" title="skipped">○ ${tests.skipped}</span>` : ''}
+           </div>`
+        : '<span style="color:var(--text-subtle)">—</span>';
+
+      return `<tr>
+        <td class="col-branch"><span class="branch-tag" title="${esc(b.branch)}">${esc(b.branch)}</span></td>
+        <td class="col-commit">
+          <span class="sha">${sha}</span>
+          ${msg ? `<span class="commit-msg" title="${msg}">${msg}</span>` : ''}
+        </td>
+        <td class="col-author" style="color:var(--text-muted)">${esc(b.commit.author || '')}</td>
+        <td class="col-owner" style="color:var(--text-muted)">${esc(b.owner || '—')}</td>
+        <td><span class="badge ${esc(b.status)}">${esc(b.status)}</span></td>
+        <td>${testsHtml}</td>
+        <td class="col-dur">${fmtDuration(b.duration)}</td>
+        <td class="col-time" title="${esc(b.receivedAt)}">${timeAgo(b.receivedAt)}</td>
+        <td>${pipeline}</td>
+      </tr>`;
+    }).join('');
+
+    renderPagination(total, pages);
+  }
+
+  function renderPagination(total, pages) {
+    const pg = document.getElementById('pagination');
+    if (pages <= 1) { pg.innerHTML = ''; return; }
+    let html = `<button class="page-btn" onclick="goPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>← Prev</button>`;
+    for (const p of pagRange(currentPage, pages)) {
+      html += p === '…'
+        ? `<span class="page-info">…</span>`
+        : `<button class="page-btn ${p === currentPage ? 'active' : ''}" onclick="goPage(${p})">${p}</button>`;
+    }
+    html += `<button class="page-btn" onclick="goPage(${currentPage + 1})" ${currentPage === pages ? 'disabled' : ''}>Next →</button>`;
+    pg.innerHTML = html;
+  }
+
+  function pagRange(cur, total) {
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+    const r = [1];
+    if (cur > 3) r.push('…');
+    for (let i = Math.max(2, cur - 1); i <= Math.min(total - 1, cur + 1); i++) r.push(i);
+    if (cur < total - 2) r.push('…');
+    r.push(total);
+    return r;
+  }
+
+  function goPage(p) { currentPage = p; renderTable(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+
+  // ── auto-refresh countdown ────────────────────────────────────────────────
+
+  let countdown = 30;
+  const badge = document.getElementById('refresh-badge');
+  setInterval(() => {
+    countdown--;
+    if (countdown <= 0) { window.location.reload(); }
+    else { badge.textContent = `refreshes in ${countdown}s`; }
+  }, 1000);
+
+  // ── theme init ────────────────────────────────────────────────────────────
+
+  const saved = localStorage.getItem('ci-dash-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+
+  // ── filter listeners + boot ───────────────────────────────────────────────
+
+  document.getElementById('f-branch').addEventListener('input', applyFilters);
+  document.getElementById('f-status').addEventListener('change', applyFilters);
+
+  renderCards(DASHBOARD_DATA.summary);
+  applyFilters();
+</script>
+</body>
+</html>

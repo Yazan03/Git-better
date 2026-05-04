@@ -257,6 +257,1209 @@ FILENAME_MAP = {
 }
 
 
+# ── Structural pattern engine ─────────────────────────────────────────────────
+#
+# Patterns are written in the target language syntax with two extensions:
+#   $VAR   — metavariable: matches any AST node, binds to VAR
+#   ...    — ellipsis: matches any sequence of arguments or statements
+#
+# Examples (Python):
+#   eval($X)                       matches eval(anything)
+#   $OBJ.execute($Q)               matches cursor.execute(q), db.execute(s), ...
+#   subprocess.call($CMD, shell=True)  matches with literal shell=True kwarg
+#   $X + $Y                        matches any binary addition
+#   pickle.loads(...)              matches pickle.loads with any args
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MV_PREFIX = "__mv_"          # prefix for metavariable sentinels in parsed AST
+_ELLIPSIS_CALL = "__ell__"    # sentinel function name for ellipsis in arg lists
+
+
+@dataclass
+class StructuralRule:
+    id: str
+    language: str
+    severity: str
+    message: str
+    cwe: str = ""
+    owasp: str = ""
+    # Compiled patterns (ast.AST for python, dict for javascript)
+    pattern: object = None           # primary pattern
+    pattern_not: list = field(default_factory=list)
+    pattern_either: list = field(default_factory=list)
+    pattern_inside: object = None
+    pattern_not_inside: object = None
+    stmt_pattern: object = None          # list[ast.stmt] for multi-line patterns
+    # Metavariable conditions
+    metavar_regex: dict = field(default_factory=dict)   # var -> compiled re.Pattern
+    metavar_pattern: dict = field(default_factory=dict) # var -> compiled sub-pattern
+
+
+def _norm_py_pattern(src: str) -> str:
+    """
+    Normalise a Python structural pattern string so ast.parse() accepts it.
+    - $VAR  → __mv_VAR__
+    - ...   (as a function argument) → __ell__()
+    - try:  shorthand → try: ...\nexcept: ... (syntactically valid)
+    """
+    # Replace $VARNAME with __mv_VARNAME__ (metavariable)
+    src = re.sub(r'\$([A-Z_][A-Z0-9_]*)', r'__mv_\1__', src)
+    # Replace standalone ... in argument/element position with __ell__()
+    src = re.sub(r'(?<![.\w])\.\.\.(?![.\w])', '__ell__()', src)
+    return src
+
+
+
+
+def _parse_py_pattern(src: str) -> ast.AST:
+    """Parse a Python structural pattern string into an AST node."""
+    normalised = _norm_py_pattern(src.strip())
+    try:
+        return ast.parse(normalised, mode='eval').body
+    except SyntaxError as e:
+        raise ValueError(f"Invalid structural pattern {src!r}: {e}") from e
+
+
+def _is_mv(node: ast.AST) -> str | None:
+    """Return the metavariable name if node is a metavariable, else None."""
+    if isinstance(node, ast.Name) and node.id.startswith(_MV_PREFIX):
+        return node.id[len(_MV_PREFIX):-2]  # strip __mv_ prefix and __ suffix
+    return None
+
+
+def _is_ellipsis_node(node: ast.AST) -> bool:
+    """Return True if node is the ellipsis sentinel __ell__()."""
+    return (isinstance(node, ast.Call) and
+            isinstance(node.func, ast.Name) and
+            node.func.id == _ELLIPSIS_CALL)
+
+
+def _ast_equal(a: ast.AST, b: ast.AST) -> bool:
+    """Structural equality of two AST nodes (for metavariable rebinding check)."""
+    if type(a) != type(b):
+        return False
+    for field_name, val_a in ast.iter_fields(a):
+        val_b = getattr(b, field_name, None)
+        if isinstance(val_a, list):
+            if not isinstance(val_b, list) or len(val_a) != len(val_b):
+                return False
+            if not all(_ast_equal(x, y) for x, y in zip(val_a, val_b)):
+                return False
+        elif isinstance(val_a, ast.AST):
+            if not isinstance(val_b, ast.AST) or not _ast_equal(val_a, val_b):
+                return False
+        else:
+            if val_a != val_b:
+                return False
+    return True
+
+
+def match_py_pattern(
+    pattern: ast.AST,
+    node: ast.AST,
+    bindings: dict | None = None,
+) -> dict | None:
+    """
+    Try to match `pattern` against `node`.
+    Returns updated bindings dict on success, None on failure.
+    Bindings map metavariable names (without $ prefix) to matched AST nodes.
+    """
+    if bindings is None:
+        bindings = {}
+
+    # ── Metavariable ─────────────────────────────────────────────────────────
+    mv_name = _is_mv(pattern)
+    if mv_name is not None:
+        if mv_name in bindings:
+            # Metavar already bound — require structural equality
+            return bindings if _ast_equal(bindings[mv_name], node) else None
+        return {**bindings, mv_name: node}
+
+    # ── Ellipsis sentinel ─────────────────────────────────────────────────────
+    if _is_ellipsis_node(pattern):
+        return bindings  # matches any single node
+
+    # ── Constant / literal ────────────────────────────────────────────────────
+    if isinstance(pattern, ast.Constant):
+        if not isinstance(node, ast.Constant):
+            return None
+        return bindings if pattern.value == node.value else None
+
+    # ── Type must match ───────────────────────────────────────────────────────
+    if type(pattern) != type(node):
+        return None
+
+    # ── Recurse into fields ───────────────────────────────────────────────────
+    current = bindings
+    for field_name, pat_val in ast.iter_fields(pattern):
+        code_val = getattr(node, field_name, None)
+
+        if isinstance(pat_val, list):
+            result = _match_py_sequence(pat_val, code_val or [], current)
+            if result is None:
+                return None
+            current = result
+
+        elif isinstance(pat_val, ast.AST):
+            # Ellipsis in field position — wildcard, skip
+            if _is_ellipsis_node(pat_val):
+                pass
+            else:
+                mv = _is_mv(pat_val)
+                if mv is not None:
+                    # Metavar in field position — bind to whatever code_val is
+                    if mv in current:
+                        existing = current[mv]
+                        ok = (existing is code_val) or (
+                            isinstance(existing, ast.AST)
+                            and isinstance(code_val, ast.AST)
+                            and _ast_equal(existing, code_val)
+                        )
+                        if not ok:
+                            return None
+                    else:
+                        current = {**current, mv: code_val}
+                elif not isinstance(code_val, ast.AST):
+                    return None
+                else:
+                    result = match_py_pattern(pat_val, code_val, current)
+                    if result is None:
+                        return None
+                    current = result
+
+        else:
+            # Scalar field (str, int, bool, None…)
+            # None in a pattern scalar field is a wildcard (matches anything)
+            if pat_val is None:
+                pass
+            # String fields may encode metavariables as __mv_NAME__ strings
+            elif (isinstance(pat_val, str)
+                    and pat_val.startswith(_MV_PREFIX)
+                    and pat_val.endswith('__')):
+                mv = pat_val[len(_MV_PREFIX):-2]
+                if mv in current:
+                    if current[mv] != code_val:
+                        return None
+                else:
+                    current = {**current, mv: code_val}
+            elif pat_val != code_val:
+                return None
+
+    return current
+
+
+def _match_py_sequence(
+    pat_seq: list,
+    code_seq: list,
+    bindings: dict,
+) -> dict | None:
+    """
+    Match a pattern sequence against a code sequence.
+    Ellipsis nodes in the pattern match zero-or-more code elements.
+    """
+    if not pat_seq and not code_seq:
+        return bindings
+
+    if not pat_seq:
+        return None  # pattern exhausted but code remains
+
+    # Leading ellipsis (expression OR statement form) — try all prefix lengths
+    if _is_ellipsis_node(pat_seq[0]) or (
+        isinstance(pat_seq[0], ast.stmt) and _is_stmt_ellipsis(pat_seq[0])
+    ):
+        for skip in range(len(code_seq) + 1):
+            result = _match_py_sequence(pat_seq[1:], code_seq[skip:], bindings)
+            if result is not None:
+                return result
+        return None
+
+    if not code_seq:
+        return None  # code exhausted but pattern remains (no leading ellipsis)
+
+    result = match_py_pattern(pat_seq[0], code_seq[0], bindings)
+    if result is None:
+        return None
+    return _match_py_sequence(pat_seq[1:], code_seq[1:], result)
+
+
+def find_py_pattern(
+    pattern: ast.AST,
+    tree: ast.AST,
+) -> list[tuple[ast.AST, dict]]:
+    """
+    Walk `tree` and return all (node, bindings) pairs where `pattern` matches.
+    """
+    matches = []
+    for node in ast.walk(tree):
+        b = match_py_pattern(pattern, node)
+        if b is not None:
+            matches.append((node, b))
+    return matches
+
+
+# ── pattern-inside helpers ────────────────────────────────────────────────────
+
+def _collect_inside_nodes(inside_pat, tree: ast.AST) -> list[ast.AST]:
+    """Return every node in tree that matches inside_pat (expression or stmt list)."""
+    if isinstance(inside_pat, list):
+        # Statement sequence pattern — find_py_stmt_pattern returns (first_stmt, bindings)
+        # The first_stmt is the compound statement node itself (Try, FunctionDef, etc.)
+        return [first_stmt for first_stmt, _ in find_py_stmt_pattern(inside_pat, tree)]
+    return [n for n in ast.walk(tree) if match_py_pattern(inside_pat, n) is not None]
+
+
+def _is_descendant_of_any(node: ast.AST, ancestors: list[ast.AST]) -> bool:
+    """Return True if node is a descendant (or is equal to) any node in ancestors."""
+    for anc in ancestors:
+        for desc in ast.walk(anc):
+            if desc is node:
+                return True
+    return False
+
+
+# ── Statement-level pattern matching ─────────────────────────────────────────
+
+def _parse_py_pattern_flex(src: str) -> "tuple[ast.AST | None, list | None]":
+    """
+    Try parsing a pattern as an expression first, then as a statement sequence.
+    Returns (expr_node, None) or (None, stmt_list).
+    """
+    normalised = _norm_py_pattern(src.strip())
+    try:
+        return ast.parse(normalised, mode='eval').body, None
+    except SyntaxError:
+        pass
+    try:
+        stmts = ast.parse(normalised, mode='exec').body
+        if stmts:
+            return None, stmts
+    except SyntaxError:
+        pass
+    raise ValueError(f"Cannot parse structural pattern: {src!r}")
+
+
+def _is_stmt_ellipsis(stmt: ast.stmt) -> bool:
+    """Return True if a statement is a bare `...` — used as gap in stmt patterns."""
+    if not isinstance(stmt, ast.Expr):
+        return False
+    v = stmt.value
+    return (isinstance(v, ast.Constant) and v.value is ...) or _is_ellipsis_node(v)
+
+
+def match_py_stmt_sequence(
+    pat_stmts: list,
+    code_stmts: list,
+    bindings: dict,
+) -> "dict | None":
+    """
+    Match a pattern statement list against a code statement list.
+    Bare `...` statements match zero-or-more code statements (gap).
+    """
+    if not pat_stmts:
+        # Pattern exhausted — matched the required subsequence
+        return bindings
+    if _is_stmt_ellipsis(pat_stmts[0]):
+        for skip in range(len(code_stmts) + 1):
+            result = match_py_stmt_sequence(pat_stmts[1:], code_stmts[skip:], bindings)
+            if result is not None:
+                return result
+        return None
+    if not code_stmts:
+        return None
+    result = match_py_pattern(pat_stmts[0], code_stmts[0], bindings)
+    if result is None:
+        return None
+    return match_py_stmt_sequence(pat_stmts[1:], code_stmts[1:], result)
+
+
+def find_py_stmt_pattern(
+    pat_stmts: list,
+    tree: ast.AST,
+) -> "list[tuple[ast.stmt, dict]]":
+    """
+    Search all statement lists in the AST for the pattern sequence.
+    Returns (first_matched_stmt, bindings) for each match.
+    """
+    results: list = []
+
+    def _search(stmts: list) -> None:
+        for start in range(len(stmts)):
+            b = match_py_stmt_sequence(pat_stmts, stmts[start:], {})
+            if b is not None:
+                results.append((stmts[start], b))
+
+    for node in ast.walk(tree):
+        for _, val in ast.iter_fields(node):
+            if isinstance(val, list) and val and isinstance(val[0], ast.stmt):
+                _search(val)
+
+    return results
+
+
+# ── JS structural pattern matching ────────────────────────────────────────────
+
+def _norm_js_pattern(src: str) -> str:
+    """Normalise JS pattern: $VAR → __mv_VAR__, ... → __ell__()"""
+    src = re.sub(r'\$([A-Z_][A-Z0-9_]*)', r'__mv_\1__', src)
+    src = re.sub(r'(?<![.\w])\.\.\.(?![.\w])', '__ell__()', src)
+    return src
+
+
+def _parse_js_pattern(src: str) -> dict | None:
+    """Parse a JS structural pattern string using esprima."""
+    esp = _get_esprima()
+    if esp is None:
+        return None
+    normalised = _norm_js_pattern(src.strip())
+    try:
+        tree = esp.parseScript(normalised, tolerant=True)
+        body = tree.toDict()["body"]
+        if body and body[0]["type"] == "ExpressionStatement":
+            return body[0]["expression"]
+        return body[0] if body else None
+    except Exception:
+        return None
+
+
+def _js_is_mv(node: dict) -> str | None:
+    """Return metavar name if this JS AST node is a metavar sentinel."""
+    if node.get("type") == "Identifier":
+        name = node.get("name", "")
+        if name.startswith("__mv_") and name.endswith("__"):
+            return name[5:-2]
+    return None
+
+
+def _js_is_ellipsis(node: dict) -> bool:
+    return (node.get("type") == "CallExpression" and
+            node.get("callee", {}).get("type") == "Identifier" and
+            node.get("callee", {}).get("name") == "__ell__")
+
+
+def match_js_pattern(
+    pattern: dict,
+    node: dict,
+    bindings: dict | None = None,
+) -> dict | None:
+    """Match a JS pattern dict against a JS AST node dict."""
+    if not isinstance(pattern, dict) or not isinstance(node, dict):
+        return None
+    if bindings is None:
+        bindings = {}
+
+    mv = _js_is_mv(pattern)
+    if mv is not None:
+        if mv in bindings:
+            return bindings if bindings[mv] == node else None
+        return {**bindings, mv: node}
+
+    if _js_is_ellipsis(pattern):
+        return bindings
+
+    if pattern.get("type") != node.get("type"):
+        return None
+
+    current = bindings
+    for key, pat_val in pattern.items():
+        if key in ("type", "loc", "range", "start", "end"):
+            continue
+        code_val = node.get(key)
+        if isinstance(pat_val, dict) and "type" in pat_val:
+            if not isinstance(code_val, dict):
+                return None
+            result = match_js_pattern(pat_val, code_val, current)
+            if result is None:
+                return None
+            current = result
+        elif isinstance(pat_val, list):
+            result = _match_js_sequence(pat_val, code_val or [], current)
+            if result is None:
+                return None
+            current = result
+        else:
+            if pat_val != code_val:
+                return None
+    return current
+
+
+def _match_js_sequence(pat_seq: list, code_seq: list, bindings: dict) -> dict | None:
+    if not pat_seq and not code_seq:
+        return bindings
+    if not pat_seq:
+        return None
+    if isinstance(pat_seq[0], dict) and _js_is_ellipsis(pat_seq[0]):
+        for skip in range(len(code_seq) + 1):
+            result = _match_js_sequence(pat_seq[1:], code_seq[skip:], bindings)
+            if result is not None:
+                return result
+        return None
+    if not code_seq:
+        return None
+    result = match_js_pattern(pat_seq[0], code_seq[0], bindings)
+    if result is None:
+        return None
+    return _match_js_sequence(pat_seq[1:], code_seq[1:], result)
+
+
+def find_js_pattern(pattern: dict, root: dict) -> list[tuple[dict, dict]]:
+    """Walk a JS AST dict and return all (node, bindings) matches."""
+    matches = []
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        b = match_js_pattern(pattern, node)
+        if b is not None:
+            matches.append((node, b))
+        for v in node.values():
+            if isinstance(v, dict):
+                walk(v)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        walk(item)
+    walk(root)
+    return matches
+
+
+# ── Built-in structural rules ─────────────────────────────────────────────────
+# These rules use the structural pattern engine instead of regex.
+# Confidence is HIGH because structural matches are AST-precise.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RAW_STRUCTURAL_RULES: list[dict] = [
+    # ── Python ────────────────────────────────────────────────────────────────
+    {"id": "SEC002S",  "language": "python", "severity": "HIGH",
+     "pattern": "eval($ARG)",
+     "message": "eval() called with dynamic argument — code injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC002S",  "language": "python", "severity": "HIGH",
+     "pattern": "exec($ARG)",
+     "message": "exec() called with dynamic argument — code injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC002S",  "language": "python", "severity": "HIGH",
+     "pattern": "os.system($CMD)",
+     "message": "os.system() — shell injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC080S",  "language": "python", "severity": "HIGH",
+     "pattern": "subprocess.call($CMD, shell=True)",
+     "message": "subprocess.call with shell=True — command injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC080S",  "language": "python", "severity": "HIGH",
+     "pattern": "subprocess.run($CMD, shell=True)",
+     "message": "subprocess.run with shell=True — command injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC080S",  "language": "python", "severity": "HIGH",
+     "pattern": "subprocess.Popen($CMD, shell=True)",
+     "message": "subprocess.Popen with shell=True — command injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC069S",  "language": "python", "severity": "HIGH",
+     "pattern": "pickle.loads($DATA)",
+     "message": "pickle.loads() — unsafe deserialization",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    {"id": "SEC069S",  "language": "python", "severity": "HIGH",
+     "pattern": "pickle.load($FILE)",
+     "message": "pickle.load() — unsafe deserialization",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    {"id": "SEC068S",  "language": "python", "severity": "HIGH",
+     "pattern": "yaml.load($DATA)",
+     "message": "yaml.load() without Loader — unsafe deserialization",
+     "pattern_not": ["yaml.load($DATA, Loader=$L)"],
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    {"id": "SEC005S",  "language": "python", "severity": "MEDIUM",
+     "pattern": "hashlib.md5($DATA)",
+     "message": "MD5 is cryptographically weak — use SHA-256 or better",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC005S",  "language": "python", "severity": "MEDIUM",
+     "pattern": "hashlib.sha1($DATA)",
+     "message": "SHA-1 is cryptographically weak — use SHA-256 or better",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC008S",  "language": "python", "severity": "MEDIUM",
+     "pattern": "random.random()",
+     "message": "random.random() is not cryptographically secure — use secrets module",
+     "cwe": "CWE-338", "owasp": "A02:2021"},
+
+    {"id": "SEC008S",  "language": "python", "severity": "MEDIUM",
+     "pattern": "random.randint($A, $B)",
+     "message": "random.randint() is not cryptographically secure — use secrets.randbelow()",
+     "cwe": "CWE-338", "owasp": "A02:2021"},
+
+    {"id": "SEC082S",  "language": "python", "severity": "HIGH",
+     "pattern": "requests.get($URL, verify=False)",
+     "message": "SSL certificate verification disabled",
+     "cwe": "CWE-295", "owasp": "A02:2021"},
+
+    {"id": "SEC082S",  "language": "python", "severity": "HIGH",
+     "pattern": "requests.post($URL, verify=False)",
+     "message": "SSL certificate verification disabled",
+     "cwe": "CWE-295", "owasp": "A02:2021"},
+
+    {"id": "SEC082S",  "language": "python", "severity": "HIGH",
+     "pattern": "requests.request($METHOD, $URL, verify=False)",
+     "message": "SSL certificate verification disabled",
+     "cwe": "CWE-295", "owasp": "A02:2021"},
+
+    {"id": "SEC073S",  "language": "python", "severity": "HIGH",
+     "pattern": "app.run(debug=True)",
+     "message": "Flask debug mode enabled in production — exposes interactive debugger",
+     "cwe": "CWE-798", "owasp": "A05:2021"},
+
+    {"id": "SEC070S",  "language": "python", "severity": "MEDIUM",
+     "pattern": "csrf_exempt($VIEW)",
+     "message": "CSRF protection disabled on this view",
+     "cwe": "CWE-352", "owasp": "A01:2021"},
+
+    {"id": "SEC079S",  "language": "python", "severity": "MEDIUM",
+     "pattern": "tempfile.mktemp()",
+     "message": "tempfile.mktemp() is insecure — use tempfile.mkstemp() or NamedTemporaryFile",
+     "cwe": "CWE-377", "owasp": "A01:2021"},
+
+    {"id": "SEC130S",  "language": "python", "severity": "HIGH",
+     "pattern": "marshal.loads($DATA)",
+     "message": "marshal.loads() — unsafe deserialization",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    # ── JavaScript ────────────────────────────────────────────────────────────
+    {"id": "SEC002S",  "language": "javascript", "severity": "HIGH",
+     "pattern": "eval($ARG)",
+     "message": "eval() — code injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC089S",  "language": "javascript", "severity": "HIGH",
+     "pattern": "unserialize($DATA)",
+     "message": "node-serialize unserialize() — remote code execution risk",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    {"id": "SEC091S",  "language": "javascript", "severity": "MEDIUM",
+     "pattern": "crypto.createCipher($ALG, $KEY)",
+     "message": "crypto.createCipher is deprecated — use createCipheriv with explicit IV",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC087S",  "language": "javascript", "severity": "MEDIUM",
+     "pattern": "new RegExp($PATTERN)",
+     "message": "RegExp from variable — potential ReDoS if pattern is user-controlled",
+     "cwe": "CWE-400", "owasp": "A05:2021"},
+
+    {"id": "SEC111S",  "language": "javascript", "severity": "HIGH",
+     "pattern": "yaml.load($DATA)",
+     "message": "js-yaml load() without safeLoad — unsafe deserialization",
+     "pattern_not": ["yaml.safeLoad($DATA)"],
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # DJANGO
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_DJ001", "language": "python", "severity": "HIGH",
+     "pattern": "$MODEL.objects.raw($SQL)",
+     "message": "Django ORM raw() — SQL injection risk if $SQL contains user input",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    {"id": "SEC_DJ002", "language": "python", "severity": "HIGH",
+     "pattern": "RawSQL($SQL, $PARAMS)",
+     "message": "Django RawSQL() — verify $SQL does not contain user-controlled fragments",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    {"id": "SEC_DJ003", "language": "python", "severity": "HIGH",
+     "pattern": "connection.execute($SQL)",
+     "message": "Raw SQL via connection.execute() — use parameterized queries",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    {"id": "SEC_DJ004", "language": "python", "severity": "MEDIUM",
+     "pattern": "csrf_exempt($FUNC)",
+     "message": "Django @csrf_exempt disables CSRF protection on this view",
+     "cwe": "CWE-352", "owasp": "A01:2021"},
+
+    {"id": "SEC_DJ005", "language": "python", "severity": "HIGH",
+     "pattern": "render_template_string($TMPL)",
+     "message": "render_template_string() with dynamic template — SSTI risk",
+     "cwe": "CWE-94", "owasp": "A03:2021"},
+
+    {"id": "SEC_DJ006", "language": "python", "severity": "HIGH",
+     "pattern": "Markup($X)",
+     "message": "Markup() marks content as safe HTML — XSS if $X is user-controlled",
+     "cwe": "CWE-79", "owasp": "A03:2021"},
+
+    {"id": "SEC_DJ007", "language": "python", "severity": "MEDIUM",
+     "pattern": "$MODEL.objects.extra(where=$COND)",
+     "message": "Django ORM extra(where=...) — SQL injection risk in raw where clause",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # FLASK / WERKZEUG
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_FL002", "language": "python", "severity": "MEDIUM",
+     "pattern": "app.run(host='0.0.0.0')",
+     "message": "Flask app listening on all interfaces — ensure this is intentional",
+     "cwe": "CWE-668", "owasp": "A05:2021"},
+
+    {"id": "SEC_FL003", "language": "python", "severity": "HIGH",
+     "pattern": "send_file($PATH)",
+     "message": "send_file() with dynamic path — path traversal risk",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    {"id": "SEC_FL004", "language": "python", "severity": "MEDIUM",
+     "pattern": "make_response($CONTENT)",
+     "message": "make_response() with dynamic content — XSS if $CONTENT is user-controlled",
+     "cwe": "CWE-79", "owasp": "A03:2021"},
+
+    {"id": "SEC_FL005", "language": "python", "severity": "HIGH",
+     "pattern": "redirect($URL)",
+     "message": "redirect() with dynamic URL — open redirect risk",
+     "cwe": "CWE-601", "owasp": "A01:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # SQLALCHEMY
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_SA001", "language": "python", "severity": "HIGH",
+     "pattern": "db.session.execute(text($SQL))",
+     "message": "SQLAlchemy text() — SQL injection if $SQL contains user input",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    {"id": "SEC_SA002", "language": "python", "severity": "HIGH",
+     "pattern": "session.execute(text($SQL))",
+     "message": "SQLAlchemy text() — SQL injection if $SQL contains user input",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    {"id": "SEC_SA003", "language": "python", "severity": "HIGH",
+     "pattern": "engine.execute($SQL)",
+     "message": "SQLAlchemy engine.execute() with raw SQL — use text() with bound params",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # PYTHON CRYPTO
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_CR001", "language": "python", "severity": "HIGH",
+     "pattern": "Cipher(algorithms.AES($KEY), modes.ECB(), ...)",
+     "message": "AES-ECB mode — ECB is deterministic and reveals plaintext patterns",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC_CR002", "language": "python", "severity": "HIGH",
+     "pattern": "Cipher(algorithms.TripleDES($KEY), ...)",
+     "message": "3DES is deprecated — use AES-256-GCM",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC_CR003", "language": "python", "severity": "HIGH",
+     "pattern": "Cipher(algorithms.Blowfish($KEY), ...)",
+     "message": "Blowfish is deprecated — use AES-256-GCM",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC_CR004", "language": "python", "severity": "HIGH",
+     "pattern": "Cipher(algorithms.ARC4($KEY), ...)",
+     "message": "RC4/ARC4 is broken — use AES-256-GCM",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC_CR006", "language": "python", "severity": "HIGH",
+     "pattern": "hashlib.new('md5')",
+     "message": "MD5 is cryptographically broken",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC_CR007", "language": "python", "severity": "HIGH",
+     "pattern": "hashlib.new('sha1')",
+     "message": "SHA-1 is cryptographically weak — use SHA-256 or better",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JWT (PYTHON)
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_JW001", "language": "python", "severity": "HIGH",
+     "pattern": "jwt.decode($TOKEN, algorithms=['none'])",
+     "message": "JWT algorithm 'none' accepted — allows unsigned tokens",
+     "cwe": "CWE-347", "owasp": "A02:2021"},
+
+    {"id": "SEC_JW003", "language": "python", "severity": "HIGH",
+     "pattern": "jwt.encode($PAYLOAD, '', ...)",
+     "message": "JWT signed with empty secret key",
+     "cwe": "CWE-321", "owasp": "A02:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # SUBPROCESS / OS (PYTHON)
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_OS001", "language": "python", "severity": "HIGH",
+     "pattern": "subprocess.check_output($CMD, shell=True)",
+     "message": "subprocess.check_output with shell=True — command injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC_OS002", "language": "python", "severity": "HIGH",
+     "pattern": "subprocess.check_call($CMD, shell=True)",
+     "message": "subprocess.check_call with shell=True — command injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC_OS003", "language": "python", "severity": "HIGH",
+     "pattern": "os.popen($CMD)",
+     "message": "os.popen() — command injection risk if $CMD is user-controlled",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC_OS004", "language": "python", "severity": "HIGH",
+     "pattern": "os.execv($PATH, $ARGS)",
+     "message": "os.execv() — command injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # DESERIALIZATION (PYTHON)
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_DS001", "language": "python", "severity": "HIGH",
+     "pattern": "yaml.load($DATA, Loader=yaml.Loader)",
+     "message": "yaml.load with full Loader — use yaml.safe_load() instead",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    {"id": "SEC_DS002", "language": "python", "severity": "HIGH",
+     "pattern": "yaml.load($DATA, Loader=yaml.UnsafeLoader)",
+     "message": "yaml.load with UnsafeLoader — use yaml.safe_load() instead",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    {"id": "SEC_DS003", "language": "python", "severity": "HIGH",
+     "pattern": "jsonpickle.decode($DATA)",
+     "message": "jsonpickle.decode() — unsafe deserialization, can execute arbitrary code",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    {"id": "SEC_DS004", "language": "python", "severity": "HIGH",
+     "pattern": "dill.loads($DATA)",
+     "message": "dill.loads() — unsafe deserialization (superset of pickle)",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    {"id": "SEC_DS005", "language": "python", "severity": "HIGH",
+     "pattern": "shelve.open($PATH)",
+     "message": "shelve.open() uses pickle internally — path traversal + deserialization risk",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # FILE / PATH (PYTHON)
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_FI001", "language": "python", "severity": "HIGH",
+     "pattern": "open($PATH, $MODE)",
+     "message": "open() with dynamic path — path traversal risk",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    {"id": "SEC_FI002", "language": "python", "severity": "HIGH",
+     "pattern": "open($PATH)",
+     "message": "open() with dynamic path — path traversal risk",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    {"id": "SEC_FI003", "language": "python", "severity": "MEDIUM",
+     "pattern": "shutil.move($SRC, $DST)",
+     "message": "shutil.move() with dynamic paths — verify inputs are sanitized",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JAVASCRIPT / EXPRESS
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_EX001", "language": "javascript", "severity": "HIGH",
+     "pattern": "app.use(cors())",
+     "message": "cors() without options — allows all origins (wildcard CORS)",
+     "cwe": "CWE-346", "owasp": "A07:2021"},
+
+    {"id": "SEC_EX002", "language": "javascript", "severity": "HIGH",
+     "pattern": "cors({origin: '*'})",
+     "message": "CORS wildcard origin — allows any domain to make credentialed requests",
+     "cwe": "CWE-346", "owasp": "A07:2021"},
+
+    {"id": "SEC_EX003", "language": "javascript", "severity": "HIGH",
+     "pattern": "app.use(session({secret: $S}))",
+     "message": "Express session — verify $S is a strong random secret, not hardcoded",
+     "cwe": "CWE-798", "owasp": "A07:2021"},
+
+    {"id": "SEC_EX005", "language": "javascript", "severity": "MEDIUM",
+     "pattern": "res.setHeader('Access-Control-Allow-Origin', '*')",
+     "message": "CORS wildcard origin set via header",
+     "cwe": "CWE-346", "owasp": "A07:2021"},
+
+    {"id": "SEC_EX006", "language": "javascript", "severity": "HIGH",
+     "pattern": "res.redirect($URL)",
+     "message": "res.redirect() — open redirect risk if $URL is user-controlled",
+     "cwe": "CWE-601", "owasp": "A01:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JAVASCRIPT / JWT
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_JW010", "language": "javascript", "severity": "HIGH",
+     "pattern": "jwt.sign($PAYLOAD, $SECRET, {algorithm: 'none'})",
+     "message": "JWT signed with algorithm 'none' — no cryptographic protection",
+     "cwe": "CWE-347", "owasp": "A02:2021"},
+
+    {"id": "SEC_JW011", "language": "javascript", "severity": "HIGH",
+     "pattern": "jwt.verify($TOKEN, $SECRET, {algorithms: ['none']})",
+     "message": "JWT verification allows 'none' algorithm — unsigned tokens accepted",
+     "cwe": "CWE-347", "owasp": "A02:2021"},
+
+    {"id": "SEC_JW012", "language": "javascript", "severity": "HIGH",
+     "pattern": "jwt.decode($TOKEN)",
+     "message": "jwt.decode() without verification — signature is not checked",
+     "cwe": "CWE-347", "owasp": "A02:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JAVASCRIPT / NODE.JS
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_ND001", "language": "javascript", "severity": "HIGH",
+     "pattern": "Function($CODE)",
+     "message": "Function() constructor with dynamic code — code injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC_ND002", "language": "javascript", "severity": "HIGH",
+     "pattern": "vm.runInNewContext($CODE)",
+     "message": "vm.runInNewContext() — sandbox escape risk with untrusted code",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC_ND003", "language": "javascript", "severity": "HIGH",
+     "pattern": "vm.runInThisContext($CODE)",
+     "message": "vm.runInThisContext() — executes code in current V8 context",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC_ND004", "language": "javascript", "severity": "HIGH",
+     "pattern": "child_process.exec($CMD, $CB)",
+     "message": "child_process.exec() — command injection if $CMD is user-controlled",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC_ND005", "language": "javascript", "severity": "HIGH",
+     "pattern": "child_process.execSync($CMD)",
+     "message": "child_process.execSync() — command injection risk",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    {"id": "SEC_ND006", "language": "javascript", "severity": "MEDIUM",
+     "pattern": "Buffer($INPUT)",
+     "message": "Buffer() constructor is deprecated — use Buffer.from() or Buffer.alloc()",
+     "cwe": "CWE-119", "owasp": "A06:2021"},
+
+    {"id": "SEC_ND007", "language": "javascript", "severity": "MEDIUM",
+     "pattern": "Buffer.allocUnsafe($N)",
+     "message": "Buffer.allocUnsafe() — contains uninitialized memory, may leak data",
+     "cwe": "CWE-119", "owasp": "A06:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JAVASCRIPT / CRYPTO
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_JC001", "language": "javascript", "severity": "MEDIUM",
+     "pattern": "Math.random()",
+     "message": "Math.random() is not cryptographically secure — use crypto.getRandomValues()",
+     "cwe": "CWE-338", "owasp": "A02:2021"},
+
+    {"id": "SEC_JC002", "language": "javascript", "severity": "HIGH",
+     "pattern": "crypto.createHash('md5')",
+     "message": "MD5 hash — cryptographically broken, use SHA-256",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC_JC003", "language": "javascript", "severity": "HIGH",
+     "pattern": "crypto.createHash('sha1')",
+     "message": "SHA-1 hash — cryptographically weak, use SHA-256",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC_JC004", "language": "javascript", "severity": "HIGH",
+     "pattern": "crypto.createCipheriv('des', $KEY, $IV)",
+     "message": "DES cipher — broken, use AES-256-GCM",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JAVASCRIPT / XSS
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_XS001", "language": "javascript", "severity": "HIGH",
+     "pattern": "document.write($X)",
+     "message": "document.write() — XSS sink if $X contains user-controlled data",
+     "cwe": "CWE-79", "owasp": "A03:2021"},
+
+    {"id": "SEC_XS003", "language": "javascript", "severity": "HIGH",
+     "pattern": "$EL.insertAdjacentHTML($POS, $HTML)",
+     "message": "insertAdjacentHTML() — XSS sink if $HTML is user-controlled",
+     "cwe": "CWE-79", "owasp": "A03:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JAVASCRIPT / SQL
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_SQ002", "language": "javascript", "severity": "HIGH",
+     "pattern": "knex.raw($SQL)",
+     "message": "knex.raw() — SQL injection if $SQL contains user input",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    {"id": "SEC_SQ003", "language": "javascript", "severity": "HIGH",
+     "pattern": "sequelize.query($SQL)",
+     "message": "Sequelize raw query — SQL injection if $SQL contains user input",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    {"id": "SEC_SQ004", "language": "javascript", "severity": "HIGH",
+     "pattern": "$MODEL.find($QUERY)",
+     "message": "Mongoose find() — NoSQL injection if $QUERY contains user-controlled operators",
+     "cwe": "CWE-943", "owasp": "A03:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JAVASCRIPT / PROTOTYPE POLLUTION
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_PP001", "language": "javascript", "severity": "HIGH",
+     "pattern": "Object.assign($TARGET, $SRC)",
+     "message": "Object.assign() — prototype pollution if $SRC is user-controlled",
+     "cwe": "CWE-1321", "owasp": "A03:2021"},
+
+    {"id": "SEC_PP003", "language": "javascript", "severity": "HIGH",
+     "pattern": "_.merge($TARGET, $SRC)",
+     "message": "lodash _.merge() — prototype pollution if $SRC is user-controlled",
+     "cwe": "CWE-1321", "owasp": "A03:2021"},
+
+    {"id": "SEC_PP004", "language": "javascript", "severity": "HIGH",
+     "pattern": "$.extend($TARGET, $SRC)",
+     "message": "jQuery.extend() — prototype pollution if $SRC is user-controlled",
+     "cwe": "CWE-1321", "owasp": "A03:2021"},
+
+    # ════════════════════════════════════════════════════════════════
+    # JAVASCRIPT / SSRF + PATH TRAVERSAL
+    # ════════════════════════════════════════════════════════════════
+    {"id": "SEC_SR001", "language": "javascript", "severity": "HIGH",
+     "pattern": "fetch($URL)",
+     "message": "fetch() — SSRF risk if $URL is user-controlled",
+     "cwe": "CWE-918", "owasp": "A10:2021"},
+
+    {"id": "SEC_SR002", "language": "javascript", "severity": "HIGH",
+     "pattern": "axios.get($URL)",
+     "message": "axios.get() — SSRF risk if $URL is user-controlled",
+     "cwe": "CWE-918", "owasp": "A10:2021"},
+
+    {"id": "SEC_SR004", "language": "javascript", "severity": "HIGH",
+     "pattern": "http.get($URL, $CB)",
+     "message": "http.get() — SSRF risk if $URL is user-controlled",
+     "cwe": "CWE-918", "owasp": "A10:2021"},
+
+    {"id": "SEC_PT001", "language": "javascript", "severity": "HIGH",
+     "pattern": "fs.readFile($PATH, $CB)",
+     "message": "fs.readFile() — path traversal risk if $PATH is user-controlled",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    {"id": "SEC_PT002", "language": "javascript", "severity": "HIGH",
+     "pattern": "fs.readFileSync($PATH)",
+     "message": "fs.readFileSync() — path traversal risk",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    {"id": "SEC_PT003", "language": "javascript", "severity": "HIGH",
+     "pattern": "fs.writeFile($PATH, $DATA, $CB)",
+     "message": "fs.writeFile() — path traversal risk if $PATH is user-controlled",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    {"id": "SEC_PT004", "language": "javascript", "severity": "HIGH",
+     "pattern": "fs.createReadStream($PATH)",
+     "message": "fs.createReadStream() — path traversal risk",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    {"id": "SEC_PT005", "language": "javascript", "severity": "HIGH",
+     "pattern": "path.join($BASE, $INPUT)",
+     "message": "path.join() — validate $INPUT to prevent directory traversal",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    # ── Python pattern-inside / pattern-not-inside rules ──────────────────────
+
+    # pickle.loads outside a try block is especially dangerous (no error handling)
+    {"id": "SEC_PI001", "language": "python", "severity": "CRITICAL",
+     "pattern": "pickle.loads($DATA)",
+     "pattern-not-inside": "try:\n    ...\nexcept $E:\n    ...",
+     "message": "pickle.loads() outside try/except — deserialization with no error handling",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    # marshal.loads outside try
+    {"id": "SEC_PI002", "language": "python", "severity": "HIGH",
+     "pattern": "marshal.loads($DATA)",
+     "pattern-not-inside": "try:\n    ...\nexcept $E:\n    ...",
+     "message": "marshal.loads() outside try/except — unsafe deserialization",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    # shelve.open outside try
+    {"id": "SEC_PI003", "language": "python", "severity": "HIGH",
+     "pattern": "shelve.open($PATH)",
+     "pattern-not-inside": "try:\n    ...\nexcept $E:\n    ...",
+     "message": "shelve.open() outside try/except — shelve uses pickle internally",
+     "cwe": "CWE-502", "owasp": "A08:2021"},
+
+    # os.system() only dangerous outside a sanitisation wrapper
+    {"id": "SEC_PI004", "language": "python", "severity": "HIGH",
+     "pattern": "os.system($CMD)",
+     "pattern-not-inside": "try:\n    ...\nexcept $E:\n    ...",
+     "message": "os.system() outside try/except — command injection risk with no error handling",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    # eval() is bad everywhere, but especially outside try
+    {"id": "SEC_PI005", "language": "python", "severity": "CRITICAL",
+     "pattern": "eval($EXPR)",
+     "pattern-not-inside": "try:\n    ...\nexcept $E:\n    ...",
+     "message": "eval() outside try/except — arbitrary code execution with no containment",
+     "cwe": "CWE-94", "owasp": "A03:2021"},
+
+    # exec() outside try
+    {"id": "SEC_PI006", "language": "python", "severity": "CRITICAL",
+     "pattern": "exec($EXPR)",
+     "pattern-not-inside": "try:\n    ...\nexcept $E:\n    ...",
+     "message": "exec() outside try/except — arbitrary code execution with no containment",
+     "cwe": "CWE-94", "owasp": "A03:2021"},
+
+    # Hardcoded secret assignment inside function (not in test file context)
+    # Rule: password/secret/key = "..." inside a function
+    {"id": "SEC_PI007", "language": "python", "severity": "HIGH",
+     "pattern": "$VAR = $SECRET",
+     "pattern-inside": "def $F($ARGS):\n    ...",
+     "metavar_regex": {"$VAR": r"(?i)(password|passwd|secret|api_key|token|private_key|access_key)",
+                       "$SECRET": r'^["\'][^"\']{8,}["\']$'},
+     "message": "Hardcoded secret '$VAR' inside function — use environment variables or a secrets manager",
+     "cwe": "CWE-798", "owasp": "A07:2021"},
+
+    # requests.get/post without verify=False check — inside functions only to reduce noise
+    {"id": "SEC_PI008", "language": "python", "severity": "MEDIUM",
+     "pattern": "requests.get($URL, verify=False)",
+     "pattern-inside": "def $F($ARGS):\n    ...",
+     "message": "TLS verification disabled in requests.get() — remove verify=False",
+     "cwe": "CWE-295", "owasp": "A02:2021"},
+
+    {"id": "SEC_PI009", "language": "python", "severity": "MEDIUM",
+     "pattern": "requests.post($URL, verify=False)",
+     "pattern-inside": "def $F($ARGS):\n    ...",
+     "message": "TLS verification disabled in requests.post() — remove verify=False",
+     "cwe": "CWE-295", "owasp": "A02:2021"},
+
+    # SQL cursor.execute with % formatting — only flag inside functions (not at module level)
+    {"id": "SEC_PI010", "language": "python", "severity": "HIGH",
+     "pattern": "$CURSOR.execute($QUERY % $ARGS)",
+     "pattern-inside": "def $F($ARGS2):\n    ...",
+     "message": "SQL injection via % string formatting in cursor.execute()",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    # Django raw() inside class-based view methods
+    {"id": "SEC_PI011", "language": "python", "severity": "HIGH",
+     "pattern": "$MODEL.objects.raw($QUERY)",
+     "pattern-not": "$MODEL.objects.raw($QUERY, $PARAMS)",
+     "pattern-inside": "def $METHOD(self, $ARGS):\n    ...",
+     "message": "Django raw() without parameters inside class method — SQL injection risk",
+     "cwe": "CWE-89", "owasp": "A03:2021"},
+
+    # Flask route handler returning user input directly
+    {"id": "SEC_PI012", "language": "python", "severity": "HIGH",
+     "pattern": "return $USER_INPUT",
+     "pattern-inside": "@app.route($PATH)\ndef $F($ARGS):\n    ...",
+     "message": "Flask route directly returns potentially untrusted value — ensure proper escaping",
+     "cwe": "CWE-79", "owasp": "A03:2021"},
+
+    # open() with 'w' mode for user-supplied path, inside function
+    {"id": "SEC_PI013", "language": "python", "severity": "MEDIUM",
+     "pattern": "open($PATH, $MODE)",
+     "pattern-inside": "def $F($ARGS):\n    ...",
+     "metavar_regex": {"$MODE": r"['\"]w"},
+     "message": "open() in write mode with potentially user-controlled path — validate path",
+     "cwe": "CWE-22", "owasp": "A01:2021"},
+
+    # subprocess.run/call with shell=True inside any function
+    {"id": "SEC_PI014", "language": "python", "severity": "HIGH",
+     "pattern": "subprocess.run($CMD, shell=True)",
+     "pattern-inside": "def $F($ARGS):\n    ...",
+     "message": "subprocess.run(shell=True) inside function — command injection if $CMD contains user input",
+     "cwe": "CWE-78", "owasp": "A03:2021"},
+
+    # hashlib.md5 / hashlib.sha1 inside password-hashing functions
+    {"id": "SEC_PI015", "language": "python", "severity": "HIGH",
+     "pattern": "hashlib.md5($DATA)",
+     "pattern-inside": "def $F($ARGS):\n    ...",
+     "metavar_regex": {"$F": r"(?i)(hash|password|passwd|digest|crypt|encode)"},
+     "message": "MD5 used in a password-hashing function — use bcrypt/argon2 instead",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+
+    {"id": "SEC_PI016", "language": "python", "severity": "HIGH",
+     "pattern": "hashlib.sha1($DATA)",
+     "pattern-inside": "def $F($ARGS):\n    ...",
+     "metavar_regex": {"$F": r"(?i)(hash|password|passwd|digest|crypt|encode)"},
+     "message": "SHA1 used in a password-hashing function — use bcrypt/argon2 instead",
+     "cwe": "CWE-327", "owasp": "A02:2021"},
+]
+
+
+def _compile_structural_rules(raw: list[dict]) -> dict[str, list[StructuralRule]]:
+    """Compile raw structural rule dicts into StructuralRule objects grouped by language."""
+    compiled: dict[str, list[StructuralRule]] = {}
+    for r in raw:
+        lang = r["language"]
+        rule_id = r["id"]
+        sev = r["severity"]
+        msg = r["message"]
+        cwe = r.get("cwe", "")
+        owasp = r.get("owasp", "")
+
+        # Skip JS rules at module load (esprima may not be available yet)
+        if lang == "javascript":
+            continue
+
+        try:
+            if lang == "python":
+                expr_pat, stmt_pat = None, None
+                if "pattern" in r:
+                    expr_pat, stmt_pat = _parse_py_pattern_flex(r["pattern"])
+                pattern_not = [_parse_py_pattern(p) for p in r.get("pattern_not", [])]
+                pattern_either = [_parse_py_pattern(p) for p in r.get("pattern_either", [])]
+                if "pattern-inside" in r:
+                    _ei, _si = _parse_py_pattern_flex(r["pattern-inside"])
+                    pattern_inside = _si if _si is not None else _ei
+                else:
+                    pattern_inside = None
+                if "pattern-not-inside" in r:
+                    _ei, _si = _parse_py_pattern_flex(r["pattern-not-inside"])
+                    pattern_not_inside = _si if _si is not None else _ei
+                else:
+                    pattern_not_inside = None
+            else:
+                continue
+
+            if expr_pat is None and stmt_pat is None and not r.get("pattern_either"):
+                continue
+
+            metavar_regex = {
+                k.lstrip("$"): re.compile(v)
+                for k, v in r.get("metavar_regex", {}).items()
+            }
+            sr = StructuralRule(
+                id=rule_id, language=lang, severity=sev,
+                message=msg, cwe=cwe, owasp=owasp,
+                pattern=expr_pat,
+                stmt_pattern=stmt_pat,
+                pattern_not=pattern_not,
+                pattern_either=pattern_either,
+                pattern_inside=pattern_inside,
+                pattern_not_inside=pattern_not_inside,
+                metavar_regex=metavar_regex,
+            )
+            compiled.setdefault(lang, []).append(sr)
+        except Exception:
+            continue  # skip invalid patterns silently
+
+    return compiled
+
+
+STRUCTURAL_RULES: dict[str, list[StructuralRule]] = _compile_structural_rules(_RAW_STRUCTURAL_RULES)
+
+
+_JS_STRUCTURAL_RULES_COMPILED = False
+
+
+def _ensure_js_structural_rules() -> None:
+    global _JS_STRUCTURAL_RULES_COMPILED
+    if _JS_STRUCTURAL_RULES_COMPILED:
+        return
+    esp = _get_esprima()
+    if esp is None:
+        return
+    js_raw = [r for r in _RAW_STRUCTURAL_RULES if r["language"] == "javascript"]
+    for r in js_raw:
+        try:
+            pattern = _parse_js_pattern(r["pattern"]) if "pattern" in r else None
+            if pattern is None:
+                continue
+            pattern_not = [p for p in [_parse_js_pattern(s) for s in r.get("pattern_not", [])] if p]
+            sr = StructuralRule(
+                id=r["id"], language="javascript", severity=r["severity"],
+                message=r["message"], cwe=r.get("cwe", ""), owasp=r.get("owasp", ""),
+                pattern=pattern, pattern_not=pattern_not,
+            )
+            STRUCTURAL_RULES.setdefault("javascript", []).append(sr)
+        except Exception:
+            continue
+    _JS_STRUCTURAL_RULES_COMPILED = True
+
 
 # ── False-positive suppression helpers ───────────────────────────────────────
 
@@ -1413,6 +2616,23 @@ _TAINT_SINKS: dict[str, list[tuple[str, str, str, str]]] = {
 }
 
 
+# ── Pre-compiled patterns for O(1) repeated matching (A1) ────────────────────
+_COMPILED_RULES: dict[str, list[tuple[str, str, re.Pattern, str]]] = {
+    lang: [(rid, sev, re.compile(pat, re.IGNORECASE), msg) for rid, sev, pat, msg in rules]
+    for lang, rules in RULES.items()
+}
+
+_COMPILED_TAINT_SOURCES: dict[str, list[re.Pattern]] = {
+    lang: [re.compile(p, re.IGNORECASE) for p in pats]
+    for lang, pats in _TAINT_SOURCES.items()
+}
+
+_COMPILED_TAINT_SINKS: dict[str, list[tuple[str, str, re.Pattern, str]]] = {
+    lang: [(rid, sev, re.compile(pat, re.IGNORECASE), msg) for rid, sev, pat, msg in sinks]
+    for lang, sinks in _TAINT_SINKS.items()
+}
+
+
 def _lhs_name(line: str, language: str) -> str | None:
     """
     Return the simple variable name being assigned on this line, or None.
@@ -1464,9 +2684,9 @@ def scan_taint(path: Path, language: str, taint_window: int = 25) -> list[Findin
 
     which single-line regex rules cannot detect.
     """
-    sources = _TAINT_SOURCES.get(language, [])
-    sinks   = _TAINT_SINKS.get(language, [])
-    if not sources or not sinks:
+    compiled_sources = _COMPILED_TAINT_SOURCES.get(language, [])
+    compiled_sinks   = _COMPILED_TAINT_SINKS.get(language, [])
+    if not compiled_sources or not compiled_sinks:
         return []
 
     try:
@@ -1480,8 +2700,8 @@ def scan_taint(path: Path, language: str, taint_window: int = 25) -> list[Findin
     for i, line in enumerate(lines, 1):
         if not line.strip():
             continue
-        for pat in sources:
-            if re.search(pat, line, re.IGNORECASE):
+        for cpat in compiled_sources:
+            if cpat.search(line):
                 var = _lhs_name(line, language)
                 if var:
                     tainted.setdefault(var, []).append(i)
@@ -1497,8 +2717,8 @@ def scan_taint(path: Path, language: str, taint_window: int = 25) -> list[Findin
         stripped = line.strip()
         if not stripped:
             continue
-        for rule_id, severity, sink_pat, message in sinks:
-            if not re.search(sink_pat, line, re.IGNORECASE):
+        for rule_id, severity, compiled_sink, message in compiled_sinks:
+            if not compiled_sink.search(line):
                 continue
             for var, src_lines in tainted.items():
                 if not re.search(r'\b' + re.escape(var) + r'\b', line):
@@ -1542,6 +2762,194 @@ _BYPASS_STRING_FILTER = frozenset({
     "SEC037",               # sensitive system file references (/etc/passwd …)
     "SEC042",               # /proc filesystem access
 })
+
+
+# ── Control Flow Graph (CFG) for path-sensitive taint ─────────────────────────────
+
+# Known sanitizer calls: assigning the result of these to a variable removes taint from that var.
+_PY_SANITIZERS: frozenset[str] = frozenset({
+    "escape", "html.escape", "markupsafe.escape", "bleach.clean",
+    "quote", "mogrify",
+    "basename", "os.path.basename",
+    "int", "float", "bool",
+    "re.escape",
+    "mark_safe", "conditional_escape", "strip_tags",
+    "validate", "sanitize", "clean",
+})
+
+
+@dataclass
+class BasicBlock:
+    id: int
+    stmts: list = field(default_factory=list)
+    succs: list = field(default_factory=list)
+    preds: list = field(default_factory=list)
+
+
+@dataclass
+class ControlFlowGraph:
+    entry_id: int
+    blocks: dict
+    exit_ids: list
+
+
+class _CFGBuilder:
+    def __init__(self):
+        self._next_id = 0
+        self.blocks: dict[int, BasicBlock] = {}
+
+    def _new_block(self) -> "BasicBlock":
+        b = BasicBlock(id=self._next_id)
+        self.blocks[self._next_id] = b
+        self._next_id += 1
+        return b
+
+    def _link(self, from_id: int, to_id: int) -> None:
+        if to_id not in self.blocks[from_id].succs:
+            self.blocks[from_id].succs.append(to_id)
+        if from_id not in self.blocks[to_id].preds:
+            self.blocks[to_id].preds.append(from_id)
+
+    def build(self, func: "ast.FunctionDef | ast.AsyncFunctionDef") -> "ControlFlowGraph":
+        entry = self._new_block()
+        exits = self._process_body(func.body, entry.id)
+        return ControlFlowGraph(entry_id=entry.id, blocks=self.blocks, exit_ids=exits)
+
+    def _process_body(self, stmts: list, current_id: int) -> list[int]:
+        for stmt in stmts:
+            ntype = type(stmt).__name__
+            if ntype in ("Return", "Raise", "Break", "Continue"):
+                self.blocks[current_id].stmts.append(stmt)
+                return [current_id]
+            elif ntype == "If":
+                self.blocks[current_id].stmts.append(stmt)
+                t_blk = self._new_block()
+                self._link(current_id, t_blk.id)
+                t_exits = self._process_body(stmt.body, t_blk.id)
+                if stmt.orelse:
+                    f_blk = self._new_block()
+                    self._link(current_id, f_blk.id)
+                    f_exits = self._process_body(stmt.orelse, f_blk.id)
+                else:
+                    f_exits = [current_id]
+                merge = self._new_block()
+                for eid in t_exits + f_exits:
+                    self._link(eid, merge.id)
+                current_id = merge.id
+            elif ntype in ("For", "While"):
+                hdr = self._new_block()
+                hdr.stmts.append(stmt)
+                self._link(current_id, hdr.id)
+                body = self._new_block()
+                self._link(hdr.id, body.id)
+                b_exits = self._process_body(
+                    stmt.body if hasattr(stmt, "body") else [], body.id
+                )
+                for eid in b_exits:
+                    self._link(eid, hdr.id)
+                after = self._new_block()
+                self._link(hdr.id, after.id)
+                current_id = after.id
+            elif ntype == "Try":
+                t_blk = self._new_block()
+                self._link(current_id, t_blk.id)
+                t_exits = self._process_body(stmt.body, t_blk.id)
+                after = self._new_block()
+                for eid in t_exits:
+                    self._link(eid, after.id)
+                for handler in getattr(stmt, "handlers", []):
+                    h_blk = self._new_block()
+                    self._link(t_blk.id, h_blk.id)
+                    h_exits = self._process_body(handler.body, h_blk.id)
+                    for eid in h_exits:
+                        self._link(eid, after.id)
+                finalbody = getattr(stmt, "finalbody", None)
+                if finalbody:
+                    f_blk = self._new_block()
+                    self._link(after.id, f_blk.id)
+                    f_exits = self._process_body(finalbody, f_blk.id)
+                    current_id = f_exits[0] if f_exits else after.id
+                else:
+                    current_id = after.id
+            else:
+                self.blocks[current_id].stmts.append(stmt)
+        return [current_id]
+
+
+def build_python_cfg(func: "ast.FunctionDef | ast.AsyncFunctionDef") -> ControlFlowGraph:
+    return _CFGBuilder().build(func)
+
+
+def _cfg_block_transfer(block: BasicBlock, in_tainted: set[str]) -> set[str]:
+    """Compute OUT = transfer(IN) for a single basic block."""
+    tainted = set(in_tainted)
+    for stmt in block.stmts:
+        for node in ast.walk(stmt):
+            rhs: ast.expr | None = None
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                rhs, targets = node.value, node.targets
+            elif isinstance(node, ast.AnnAssign) and node.value:
+                rhs, targets = node.value, [node.target]
+            elif isinstance(node, ast.NamedExpr):
+                rhs, targets = node.value, [node.target]
+            if rhs is None:
+                continue
+            is_sanitized = (
+                isinstance(rhs, ast.Call) and (
+                    _dotted_name(rhs.func) in _PY_SANITIZERS
+                    or _dotted_name(rhs.func).rsplit(".", 1)[-1] in _PY_SANITIZERS
+                )
+            )
+            is_tainted = (not is_sanitized) and (
+                _is_py_source(rhs) or _uses_tainted(rhs, tainted)
+            )
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    if is_sanitized:
+                        tainted.discard(t.id)
+                    elif is_tainted:
+                        tainted.add(t.id)
+                elif isinstance(t, (ast.Tuple, ast.List)):
+                    for elt in t.elts:
+                        if isinstance(elt, ast.Name):
+                            if is_sanitized:
+                                tainted.discard(elt.id)
+                            elif is_tainted:
+                                tainted.add(elt.id)
+    return tainted
+
+
+def cfg_path_sensitive_taint(cfg: ControlFlowGraph) -> dict[int, set[str]]:
+    """
+    Forward dataflow analysis (worklist) over the CFG.
+    Returns block_id → tainted variable set at block ENTRY.
+    Sanitizer calls kill taint from the assigned variable (reduces false positives).
+    """
+    in_sets: dict[int, set[str]] = {bid: set() for bid in cfg.blocks}
+    out_sets: dict[int, set[str]] = {bid: set() for bid in cfg.blocks}
+    worklist: list[int] = [cfg.entry_id]
+    on_list: set[int] = {cfg.entry_id}
+
+    while worklist:
+        bid = worklist.pop(0)
+        on_list.discard(bid)
+        block = cfg.blocks[bid]
+
+        new_in: set[str] = set()
+        for pred in block.preds:
+            new_in |= out_sets.get(pred, set())
+        in_sets[bid] = new_in
+
+        new_out = _cfg_block_transfer(block, new_in)
+        if new_out != out_sets.get(bid):
+            out_sets[bid] = new_out
+            for succ in block.succs:
+                if succ not in on_list:
+                    worklist.append(succ)
+                    on_list.add(succ)
+
+    return in_sets
 
 
 # ── Python AST intra-function taint analysis ─────────────────────────────────
@@ -1600,15 +3008,16 @@ def _is_py_source(node: ast.expr) -> bool:
     """
     if isinstance(node, ast.Call):
         name = _py_call_name(node)
-        # Everything on flask/Django request is tainted: request.args.get(…),
-        # request.form.getlist(…), request.get_json(), etc.
-        if name.startswith("request."):
+        # Everything on flask/Django request objects is tainted
+        first = name.split(".")[0] if "." in name else ""
+        if name.startswith("request.") or first in _REQUEST_PARAM_NAMES:
             return True
         if name in _PY_SOURCE_CALLS or any(name.endswith("." + s) for s in _PY_SOURCE_CALLS):
             return True
     if isinstance(node, ast.Attribute):
         name = _dotted_name(node)
-        if name.startswith("request."):
+        first = name.split(".")[0] if "." in name else ""
+        if name.startswith("request.") or first in _REQUEST_PARAM_NAMES:
             return True
     if isinstance(node, ast.Subscript):
         return _is_py_source(node.value)
@@ -1618,30 +3027,110 @@ def _is_py_source(node: ast.expr) -> bool:
     return False
 
 
+# ── Type-based false-positive suppression ────────────────────────────────────
+
+# Functions that return a numeric/bool/safe type regardless of their arguments.
+_NUMERIC_SAFE_BUILTINS: frozenset[str] = frozenset({
+    "int", "float", "bool", "len", "id", "abs", "round", "ord", "hash",
+})
+
+# Sanitisation functions that scrub dangerous content from strings.
+_SANITIZER_CALLS: frozenset[str] = frozenset({
+    "html.escape",
+    "markupsafe.escape",
+    "bleach.clean",
+    "bleach.linkify",
+    "cgi.escape",
+})
+
+
+def _is_safe_transform(node: ast.expr) -> bool:
+    """
+    Return True when a node provably produces a safe (non-injectable) value.
+
+    Safe transforms include:
+    - Numeric coercions:  int(x), float(x), bool(x), len(x), …
+    - Comparisons:        x == y, x is None  →  bool, not a string
+    - Sanitisers:         html.escape(x), markupsafe.escape(x), bleach.clean(x)
+    - Safe regex results: re.match(…), re.search(…), re.fullmatch(…)
+
+    These suppress taint propagation because the result cannot directly cause
+    SQL-injection or XSS even when the input is tainted.
+    """
+    if isinstance(node, ast.Call):
+        name = _py_call_name(node)
+        last = name.rsplit(".", 1)[-1]
+        # Numeric builtins are always safe
+        if last in _NUMERIC_SAFE_BUILTINS or name in _NUMERIC_SAFE_BUILTINS:
+            return True
+        # Sanitiser functions produce safe output
+        if name in _SANITIZER_CALLS:
+            return True
+        # re.match / re.search / re.fullmatch return a Match object, not the string
+        if name in ("re.match", "re.search", "re.fullmatch", "re.compile"):
+            return True
+    if isinstance(node, ast.Compare):
+        # Comparison expressions always produce a bool — safe from string injection
+        return True
+    return False
+
+
 def _uses_tainted(node: ast.expr, tainted: set[str]) -> bool:
-    """Return True if the expression tree contains any tainted variable name."""
+    """
+    Return True if the expression tree contains any tainted variable name.
+
+    A5: Covers all common propagation forms:
+    - ast.Name: direct variable reference
+    - ast.BinOp: handles both `+` concat and `%` formatting
+      ("SELECT %s" % tainted → BinOp(Str, Mod, tainted); right side checked)
+    - ast.JoinedStr + ast.FormattedValue: f-strings (both node types handled)
+    - ast.Call: "str".format(tainted) — args are checked
+    - ast.Attribute: also checks attr: keys from alias tracking
+
+    Calls that provably produce safe types (int(), len(), html.escape(), …)
+    are suppressed via _is_safe_transform even when arguments are tainted.
+    """
+    # Short-circuit: if the whole expression produces a safe type, it's not tainted
+    if _is_safe_transform(node):
+        return False
     if isinstance(node, ast.Name):
         return node.id in tainted
     if isinstance(node, ast.BinOp):
+        # Covers + concat AND % formatting: both left and right are checked recursively
         return _uses_tainted(node.left, tainted) or _uses_tainted(node.right, tainted)
-    if isinstance(node, ast.JoinedStr):           # f-string
+    if isinstance(node, ast.JoinedStr):           # f-string outer node
         for child in ast.walk(node):
             if isinstance(child, ast.Name) and child.id in tainted:
                 return True
         return False
+    if isinstance(node, ast.FormattedValue):      # inner {expr} part of f-string
+        return _uses_tainted(node.value, tainted)
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         return any(_uses_tainted(e, tainted) for e in node.elts)
     if isinstance(node, ast.Dict):
         return any(_uses_tainted(v, tainted) for v in node.values if v)
     if isinstance(node, ast.Call):
-        return any(_uses_tainted(a, tainted) for a in node.args) or any(
-            _uses_tainted(kw.value, tainted) for kw in node.keywords
-        )
+        # Safe-transform calls (int, len, html.escape, …) are already filtered above.
+        # Check arguments and keywords for tainted values.
+        if any(_uses_tainted(a, tainted) for a in node.args):
+            return True
+        if any(_uses_tainted(kw.value, tainted) for kw in node.keywords):
+            return True
+        # Also check the callee itself: for method calls like raw.strip() or
+        # tainted_obj.format(...) the tainted value is node.func.value, not an arg.
+        if isinstance(node.func, ast.Attribute):
+            return _uses_tainted(node.func.value, tainted)
+        return False
     if isinstance(node, ast.Subscript):
+        # tainted_dict['key'] or tainted_lst[i] → tainted
         return _uses_tainted(node.value, tainted)
     if isinstance(node, ast.IfExp):
         return _uses_tainted(node.body, tainted) or _uses_tainted(node.orelse, tainted)
     if isinstance(node, ast.Attribute):
+        # Check both the object chain and the attr: alias key
+        attr_key = "attr:" + _dotted_name(node)
+        if attr_key in tainted:
+            return True
         return _uses_tainted(node.value, tainted)
     if isinstance(node, ast.Starred):
         return _uses_tainted(node.value, tainted)
@@ -1651,6 +3140,7 @@ def _uses_tainted(node: ast.expr, tainted: set[str]) -> bool:
 def _propagate_taint(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     tainted_funcs: frozenset[str] = frozenset(),
+    initial_taint: "set[str] | None" = None,
 ) -> set[str]:
     """
     Fixed-point taint propagation within a function body.
@@ -1665,21 +3155,47 @@ def _propagate_taint(
 
     If tainted_funcs is non-empty, calls to those functions are also treated
     as taint sources (inter-procedural taint propagation).
+
+    A2: Pre-extract all assignment-like nodes once — O(N) instead of O(N×K).
+
+    Also handles:
+    - Attribute aliases:  self.data = tainted  → tracks attr:self.data
+    - Subscript aliases:  result = d['key']    → result tainted if d tainted
+    - Augmented assign:   buf += tainted        → buf tainted
+    - Conditional assign: x = t if c else s    → x tainted (conservative)
+    - Container taint:    lst = [t, s]         → lst tainted; extraction propagated
+    - Mutation:           lst.append(tainted)  → lst tainted
     """
-    tainted: set[str] = set()
+    # Pre-extract all assignment-like nodes once
+    assign_nodes: list[tuple[ast.expr, list[ast.expr]]] = []
+    # mutation_calls: list of (container_name, arg_node) for .append/.extend/.update
+    mutation_calls: list[tuple[str, ast.expr]] = []
+
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign):
+            assign_nodes.append((node.value, node.targets))
+        elif isinstance(node, ast.AnnAssign) and node.value:
+            assign_nodes.append((node.value, [node.target]))
+        elif isinstance(node, ast.NamedExpr):   # walrus :=
+            assign_nodes.append((node.value, [node.target]))
+        elif isinstance(node, ast.AugAssign):   # buf += tainted
+            assign_nodes.append((node.value, [node.target]))
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            # Detect lst.append(x), lst.extend(x), d.update(x)
+            call = node.value
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr in ("append", "extend", "update", "add")
+                and isinstance(call.func.value, ast.Name)
+                and call.args
+            ):
+                mutation_calls.append((call.func.value.id, call.args[0]))
+
+    # Seed from caller-supplied initial taint (e.g. class-level field taint)
+    tainted: set[str] = set(initial_taint) if initial_taint else set()
     while True:
         prev = len(tainted)
-        for node in ast.walk(func):
-            rhs: ast.expr | None = None
-            targets: list[ast.expr] = []
-            if isinstance(node, ast.Assign):
-                rhs, targets = node.value, node.targets
-            elif isinstance(node, ast.AnnAssign) and node.value:
-                rhs, targets = node.value, [node.target]
-            elif isinstance(node, ast.NamedExpr):   # walrus :=
-                rhs, targets = node.value, [node.target]
-            if rhs is None:
-                continue
+        for rhs, targets in assign_nodes:
             is_tainted = _is_py_source(rhs) or _uses_tainted(rhs, tainted)
             # Inter-procedural: calls to known tainted functions are also sources
             if not is_tainted and tainted_funcs and isinstance(rhs, ast.Call):
@@ -1695,9 +3211,120 @@ def _propagate_taint(
                         for elt in t.elts:
                             if isinstance(elt, ast.Name):
                                 tainted.add(elt.id)
+                    elif isinstance(t, ast.Attribute):
+                        # self.data = tainted → track attr:self.data
+                        attr_key = "attr:" + _dotted_name(t)
+                        tainted.add(attr_key)
+                    elif isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
+                        # data['key'] = tainted → mark container as tainted
+                        tainted.add(t.value.id)
+
+        # Container mutation: lst.append(tainted_val) → lst tainted
+        for container_name, arg_node in mutation_calls:
+            if _uses_tainted(arg_node, tainted) or _is_py_source(arg_node):
+                tainted.add(container_name)
+
         if len(tainted) == prev:
             break   # fixed point reached
     return tainted
+
+
+_REQUEST_PARAM_NAMES: frozenset[str] = frozenset({
+    "request", "req", "ctx", "context", "event", "e",
+    "app_request", "http_request", "flask_request",
+})
+
+_REQUEST_ATTR_PREFIXES: frozenset[str] = frozenset({
+    "args", "form", "json", "data", "body", "params",
+    "files", "cookies", "headers", "values", "get_json",
+})
+
+
+def _method_param_seed(func: "ast.FunctionDef | ast.AsyncFunctionDef") -> set[str]:
+    """
+    Return the set of parameter names that should be treated as taint sources.
+
+    Any parameter that:
+    - Is named like a request object (req, ctx, request, …), OR
+    - Is not `self`/`cls` and the method has a request-like param anywhere
+    will seed taint so that `req.args.get(...)` etc. propagate correctly.
+    """
+    seed: set[str] = set()
+    param_names = [
+        a.arg for a in func.args.args
+        if a.arg not in ("self", "cls")
+    ]
+    for p in param_names:
+        if p in _REQUEST_PARAM_NAMES:
+            seed.add(p)
+    # Also seed if any parameter is accessed with request-like attributes in
+    # the body — catches custom names like `incoming`, `payload`, etc.
+    for node in ast.walk(func):
+        if isinstance(node, ast.Attribute):
+            if (isinstance(node.value, ast.Name)
+                    and node.value.id in param_names
+                    and node.attr in _REQUEST_ATTR_PREFIXES):
+                seed.add(node.value.id)
+    return seed
+
+
+def _get_class_tainted_fields(
+    class_node: ast.ClassDef,
+    tainted_funcs: frozenset[str] = frozenset(),
+) -> set[str]:
+    """
+    Fixed-point collection of `attr:self.*` taint across all methods of a class.
+
+    Runs multiple passes until the set of tainted fields stabilises, so that
+    a field set in one method and read in another is tracked correctly:
+
+        class Handler:
+            def load(self, req):
+                self.query = req.args.get('q')   # → attr:self.query
+            def execute(self, db):
+                db.cursor().execute(self.query)  # ← seeded by attr:self.query
+    """
+    methods = [
+        n for n in ast.walk(class_node)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    class_attrs: set[str] = set()
+    while True:
+        prev = len(class_attrs)
+        for method in methods:
+            # Seed with request-like params so req.args.get() is treated as tainted
+            param_seed = _method_param_seed(method)
+            seed = class_attrs | param_seed
+            method_taint = _propagate_taint(method, tainted_funcs,
+                                            initial_taint=seed if seed else None)
+            for key in method_taint:
+                if key.startswith("attr:self.") or key.startswith("attr:cls."):
+                    class_attrs.add(key)
+        if len(class_attrs) == prev:
+            break   # fixed point
+    return class_attrs
+
+
+def _build_parent_map(tree: ast.AST) -> dict[int, ast.AST]:
+    """Return {id(child): parent_node} for every node in the AST."""
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    return parents
+
+
+def _enclosing_class_name(
+    func_node: ast.AST,
+    parent_map: dict[int, ast.AST],
+) -> str | None:
+    """Walk up the parent chain and return the name of the immediately enclosing ClassDef."""
+    node = parent_map.get(id(func_node))
+    while node is not None:
+        if isinstance(node, ast.ClassDef):
+            return node.name
+        node = parent_map.get(id(node))
+    return None
 
 
 def scan_python_ast_taint(
@@ -1738,12 +3365,42 @@ def scan_python_ast_taint(
     # Merge cross-file tainted functions into the local set
     frozen_tainted_funcs = frozenset(tainted_funcs) | cross_file_funcs
 
-    # Phase 2: full analysis with inter-procedural taint
+    # Phase 1b: build class-level field taint maps (cross-method tracking)
+    parent_map = _build_parent_map(tree)
+    class_field_taint: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            class_field_taint[node.name] = _get_class_tainted_fields(
+                node, frozen_tainted_funcs
+            )
+
+    # Phase 2: CFG-based path-sensitive taint + inter-procedural taint
     findings: list[Finding] = []
     reported: set[tuple[int, str]] = set()
 
     for func in all_funcs:
-        tainted = _propagate_taint(func, frozen_tainted_funcs)
+        # Seed with class-level field taint when inside a class method
+        cls_name = _enclosing_class_name(func, parent_map)
+        initial = class_field_taint.get(cls_name) if cls_name else None
+
+        # Always run _propagate_taint (handles alias analysis, container taint,
+        # AugAssign, etc.) as the primary analysis.
+        tainted = _propagate_taint(func, frozen_tainted_funcs,
+                                   initial_taint=initial)
+
+        # A4: optionally supplement with CFG-based analysis for path sensitivity.
+        # Union of CFG entry-sets can catch additional taint from multi-block
+        # functions. We merge rather than replace so the alias extensions in
+        # _propagate_taint are always preserved.
+        try:
+            cfg = build_python_cfg(func)
+            in_sets = cfg_path_sensitive_taint(cfg)
+            if in_sets:
+                for s in in_sets.values():
+                    tainted.update(s)
+        except Exception:
+            pass
+
         if not tainted:
             continue
 
@@ -1782,9 +3439,730 @@ def scan_python_ast_taint(
     return findings
 
 
+# ── JavaScript AST taint analysis (esprima) ───────────────────────────────────────────
+
+_esprima = None
+_ESPRIMA_AVAILABLE: bool | None = None  # None = not yet checked
+
+
+def _get_esprima():
+    global _esprima, _ESPRIMA_AVAILABLE
+    if _ESPRIMA_AVAILABLE is None:
+        try:
+            import esprima as _mod
+            _esprima = _mod
+            _ESPRIMA_AVAILABLE = True
+        except ImportError:
+            _ESPRIMA_AVAILABLE = False
+    return _esprima if _ESPRIMA_AVAILABLE else None
+
+
+# JS taint sources — prefixes/dotted names whose value is user-controlled
+_JS_AST_SOURCES: frozenset[str] = frozenset({
+    # Express / Node HTTP
+    "req.query", "req.body", "req.params", "req.headers", "req.cookies",
+    "req.files", "req.file", "req.rawBody", "req.text",
+    "request.query", "request.body", "request.params", "request.headers",
+    "request.cookies", "request.files",
+    # Koa
+    "ctx.query", "ctx.params", "ctx.body", "ctx.request", "ctx.headers",
+    "ctx.cookies", "ctx.querystring",
+    # Fastify
+    "request.body", "request.params", "request.query", "request.headers",
+    # Browser DOM
+    "location.search", "location.hash", "location.href", "location.pathname",
+    "document.URL", "document.documentURI", "document.referrer", "document.cookie",
+    "window.location", "window.name",
+    # DOM form inputs / events
+    "event.target.value", "event.data", "e.target.value", "e.data",
+    "target.value",
+    # Web APIs
+    "URLSearchParams", "searchParams",
+    "localStorage", "sessionStorage",
+    "indexedDB",
+    # process
+    "process.env", "process.argv",
+    # WebSocket / postMessage
+    "message.data", "msg.data",
+    # GraphQL
+    "args", "context.args",
+})
+
+# JS sinks — (rule_id, severity, set-of-function-name-suffixes, message)
+_JS_AST_SINKS: list[tuple[str, str, frozenset[str], str]] = [
+    ("SEC002T", "HIGH",
+     frozenset({"eval", "execScript", "setImmediate", "setInterval", "setTimeout"}),
+     "Code injection — user-controlled value flows into dynamic code execution"),
+    ("SEC002T", "HIGH",
+     frozenset({"Function"}),
+     "Code injection — new Function() with user-controlled string"),
+    ("SEC004T", "HIGH",
+     frozenset({"query", "execute", "run", "all", "prepare",
+                "raw", "knex", "sql", "select", "where", "from"}),
+     "SQL/NoSQL injection — user-controlled value flows into database query"),
+    ("SEC003T", "HIGH",
+     frozenset({"exec", "execSync", "execFile", "execFileSync",
+                "spawn", "spawnSync", "fork"}),
+     "Command injection — user-controlled value flows into shell execution"),
+    ("SEC035T", "HIGH",
+     frozenset({"readFile", "readFileSync", "writeFile", "writeFileSync",
+                "createReadStream", "createWriteStream", "sendFile",
+                "open", "openSync", "appendFile", "appendFileSync",
+                "unlink", "unlinkSync", "rename", "renameSync",
+                "copyFile", "copyFileSync", "mkdir", "mkdirSync",
+                "rmdir", "rmdirSync", "stat", "statSync", "lstat"}),
+     "Path traversal — user-controlled value used as file path"),
+    ("SEC006T", "HIGH",
+     frozenset({"write", "writeln", "insertAdjacentHTML", "setHTML",
+                "render", "send"}),
+     "XSS — user-controlled value written to document/response"),
+    ("SEC066", "HIGH",
+     frozenset({"fetch", "request", "axios", "got", "needle",
+                "superagent", "http.get", "https.get", "http.request", "https.request"}),
+     "SSRF — user-controlled value used as URL in HTTP request"),
+    ("SEC056T", "MEDIUM",
+     frozenset({"redirect"}),
+     "Open redirect — user-controlled value used as redirect URL"),
+    ("SEC099T", "HIGH",
+     frozenset({"deserialize", "fromJSON", "parse", "unserialize"}),
+     "Unsafe deserialization — user-controlled value passed to deserializer"),
+    ("SEC100T", "HIGH",
+     frozenset({"template", "compile", "render"}),
+     "Server-side template injection — user-controlled value in template engine"),
+]
+
+# JS safe transforms — calls that produce numeric/safe output even from tainted input
+_JS_SAFE_TRANSFORMS: frozenset[str] = frozenset({
+    "parseInt", "parseFloat", "Number", "BigInt", "Boolean",
+    "isNaN", "isFinite", "isInteger",
+    "encodeURIComponent", "encodeURI", "escape",
+    "DOMPurify.sanitize", "sanitize", "purify",
+    "validator.escape", "validator.toInt", "validator.toFloat",
+    "sanitizeHtml", "xss",
+    "Math.abs", "Math.floor", "Math.ceil", "Math.round", "Math.trunc",
+    "JSON.stringify",  # safe for XSS when used correctly in data attributes
+})
+
+
+def _js_member_chain(node: dict) -> str:
+    """Recursively resolve a MemberExpression into a dotted string."""
+    if not isinstance(node, dict):
+        return ""
+    ntype = node.get("type", "")
+    if ntype == "Identifier":
+        return node.get("name", "")
+    if ntype == "MemberExpression" and not node.get("computed"):
+        obj = _js_member_chain(node["object"])
+        prop_node = node.get("property", {})
+        prop = prop_node.get("name", "") if prop_node.get("type") == "Identifier" else ""
+        return f"{obj}.{prop}" if (obj and prop) else (obj or prop)
+    if ntype == "ThisExpression":
+        return "this"
+    return ""
+
+
+def _js_is_source(node: dict) -> bool:
+    """Return True if this JS AST node is a user-controlled taint source."""
+    if not isinstance(node, dict):
+        return False
+    ntype = node.get("type", "")
+    if ntype in ("MemberExpression", "Identifier"):
+        chain = _js_member_chain(node)
+        if chain and any(chain == s or chain.startswith(s + ".") for s in _JS_AST_SOURCES):
+            return True
+    if ntype == "CallExpression":
+        # fetch(...).then(r => r.json()) style — callee chain matches source prefix
+        chain = _js_member_chain(node.get("callee", {}))
+        if chain and any(chain == s or chain.startswith(s + ".") for s in _JS_AST_SOURCES):
+            return True
+    if ntype == "AwaitExpression":
+        # await req.json(), await fetch(url).json()
+        return _js_is_source(node.get("argument", {}))
+    return False
+
+
+def _js_is_safe_transform(node: dict) -> bool:
+    """Return True when a JS call/expression produces a safe (numeric/sanitized) value."""
+    if not isinstance(node, dict):
+        return False
+    ntype = node.get("type", "")
+    if ntype == "CallExpression":
+        chain = _js_member_chain(node.get("callee", {}))
+        last = chain.rsplit(".", 1)[-1]
+        if chain in _JS_SAFE_TRANSFORMS or last in _JS_SAFE_TRANSFORMS:
+            return True
+    if ntype in ("UnaryExpression",) and node.get("operator") in ("+", "-", "~", "!"):
+        return True  # unary +/- coerce to number; ! coerces to bool
+    if ntype == "BinaryExpression" and node.get("operator") in (
+        "===", "!==", "==", "!=", "<", ">", "<=", ">=", "instanceof", "in"
+    ):
+        return True  # comparison always yields boolean
+    return False
+
+
+def _js_uses_tainted(node: dict, tainted: set[str]) -> bool:
+    """Return True if this JS expression subtree references any tainted variable."""
+    if not isinstance(node, dict):
+        return False
+    # Safe transforms break the taint chain
+    if _js_is_safe_transform(node):
+        return False
+    ntype = node.get("type", "")
+    if ntype == "Identifier":
+        return node["name"] in tainted
+    if ntype == "MemberExpression":
+        # obj.prop — tainted if obj is tainted OR dotted key like "obj.prop" is tainted
+        obj_chain = _js_member_chain(node)
+        if obj_chain and obj_chain in tainted:
+            return True
+        return _js_uses_tainted(node.get("object", {}), tainted)
+    if ntype in ("BinaryExpression", "LogicalExpression"):
+        return (_js_uses_tainted(node.get("left", {}), tainted) or
+                _js_uses_tainted(node.get("right", {}), tainted))
+    if ntype == "AssignmentExpression":
+        return _js_uses_tainted(node.get("right", {}), tainted)
+    if ntype == "TemplateLiteral":
+        return any(_js_uses_tainted(e, tainted) for e in node.get("expressions", []))
+    if ntype == "CallExpression":
+        args = node.get("arguments", [])
+        callee = node.get("callee", {})
+        # method calls: tainted.method(...) → result is tainted
+        if callee.get("type") == "MemberExpression":
+            if _js_uses_tainted(callee.get("object", {}), tainted):
+                return True
+        return any(_js_uses_tainted(a, tainted) for a in args)
+    if ntype == "ArrayExpression":
+        return any(_js_uses_tainted(e, tainted) for e in node.get("elements", []) if e)
+    if ntype == "ObjectExpression":
+        return any(_js_uses_tainted(p.get("value", {}), tainted)
+                   for p in node.get("properties", []))
+    if ntype == "ConditionalExpression":
+        return (_js_uses_tainted(node.get("consequent", {}), tainted) or
+                _js_uses_tainted(node.get("alternate", {}), tainted))
+    if ntype == "SpreadElement":
+        return _js_uses_tainted(node.get("argument", {}), tainted)
+    if ntype == "AwaitExpression":
+        return _js_uses_tainted(node.get("argument", {}), tainted)
+    if ntype == "YieldExpression":
+        return _js_uses_tainted(node.get("argument", {}), tainted)
+    if ntype in ("TypeCastExpression", "TSAsExpression", "TSTypeAssertion"):
+        return _js_uses_tainted(node.get("expression", {}), tainted)
+    if ntype == "SequenceExpression":
+        return any(_js_uses_tainted(e, tainted) for e in node.get("expressions", []))
+    if ntype == "NewExpression":
+        return any(_js_uses_tainted(a, tainted) for a in node.get("arguments", []))
+    if ntype == "TaggedTemplateExpression":
+        return _js_uses_tainted(node.get("quasi", {}), tainted)
+    return False
+
+
+def _js_walk(node: dict):
+    """Yield all nodes in the JS AST via pre-order traversal."""
+    if not isinstance(node, dict) or "type" not in node:
+        return
+    yield node
+    for v in node.values():
+        if isinstance(v, dict) and "type" in v:
+            yield from _js_walk(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict) and "type" in item:
+                    yield from _js_walk(item)
+
+
+def _js_pattern_names(id_node: dict) -> list[str]:
+    """
+    Extract all variable names from a VariableDeclarator id node.
+    Handles Identifier, ObjectPattern, ArrayPattern, RestElement.
+    """
+    if not isinstance(id_node, dict):
+        return []
+    ntype = id_node.get("type", "")
+    if ntype == "Identifier":
+        return [id_node["name"]]
+    if ntype == "ObjectPattern":
+        names = []
+        for prop in id_node.get("properties", []):
+            if prop.get("type") == "RestElement":
+                names += _js_pattern_names(prop.get("argument", {}))
+            else:
+                names += _js_pattern_names(prop.get("value", {}))
+        return names
+    if ntype == "ArrayPattern":
+        names = []
+        for elt in id_node.get("elements", []):
+            if elt:
+                names += _js_pattern_names(elt)
+        return names
+    if ntype == "RestElement":
+        return _js_pattern_names(id_node.get("argument", {}))
+    if ntype == "AssignmentPattern":
+        return _js_pattern_names(id_node.get("left", {}))
+    return []
+
+
+def _js_propagate_in_scope(body_nodes: list[dict], tainted: set[str]) -> set[str]:
+    """
+    Fixed-point taint propagation over a JS statement list.
+
+    Handles:
+    - var/let/const declarations (including destructuring)
+    - Assignment expressions
+    - Property assignments (obj.prop = tainted → "obj.prop" in tainted)
+    - Augmented assignments (+=, etc.)
+    - For-of/for-in loops seeding loop variable
+    - Nested scopes (if/for/while/try — conservative union of all branches)
+    - Await expressions
+    - Spread / rest elements
+    """
+    tainted = set(tainted)
+
+    def _process_stmts(stmts: list[dict]) -> None:
+        """Single pass over a statement list, mutating tainted in place."""
+        for node in stmts:
+            ntype = node.get("type", "")
+
+            # ── Variable declaration ──────────────────────────────────────────
+            if ntype == "VariableDeclaration":
+                for decl in node.get("declarations", []):
+                    init = decl.get("init")
+                    if init and (_js_is_source(init) or _js_uses_tainted(init, tainted)):
+                        for name in _js_pattern_names(decl.get("id", {})):
+                            tainted.add(name)
+
+            # ── Expression statement ──────────────────────────────────────────
+            elif ntype == "ExpressionStatement":
+                expr = node.get("expression", {})
+                etype = expr.get("type", "")
+                if etype == "AssignmentExpression":
+                    lhs = expr.get("left", {})
+                    rhs = expr.get("right", {})
+                    rhs_tainted = _js_is_source(rhs) or _js_uses_tainted(rhs, tainted)
+                    if rhs_tainted:
+                        # x = tainted
+                        if lhs.get("type") == "Identifier":
+                            tainted.add(lhs["name"])
+                        # obj.prop = tainted → track "obj.prop"
+                        elif lhs.get("type") == "MemberExpression":
+                            chain = _js_member_chain(lhs)
+                            if chain:
+                                tainted.add(chain)
+                    # += style augmented: if lhs already tainted, still tainted
+                    if expr.get("operator", "=") != "=" and lhs.get("type") == "Identifier":
+                        if lhs["name"] in tainted:
+                            pass  # stays tainted
+
+            # ── Return statement ──────────────────────────────────────────────
+            elif ntype == "ReturnStatement":
+                pass  # handled by caller
+
+            # ── For-of / for-in: loop variable gets tainted if iterable is tainted
+            elif ntype in ("ForOfStatement", "ForInStatement"):
+                right = node.get("right", {})
+                left = node.get("left", {})
+                body = node.get("body", {})
+                if _js_is_source(right) or _js_uses_tainted(right, tainted):
+                    if left.get("type") == "VariableDeclaration":
+                        for decl in left.get("declarations", []):
+                            for name in _js_pattern_names(decl.get("id", {})):
+                                tainted.add(name)
+                if body:
+                    inner = body.get("body", []) if body.get("type") == "BlockStatement" else [body]
+                    _process_stmts(inner)
+
+            # ── For statement ─────────────────────────────────────────────────
+            elif ntype == "ForStatement":
+                init = node.get("init")
+                if init:
+                    _process_stmts([init])
+                body = node.get("body", {})
+                if body:
+                    inner = body.get("body", []) if body.get("type") == "BlockStatement" else [body]
+                    _process_stmts(inner)
+
+            # ── If/else: conservative union of both branches ──────────────────
+            elif ntype == "IfStatement":
+                cons = node.get("consequent", {})
+                alt = node.get("alternate")
+                if cons:
+                    inner = cons.get("body", []) if cons.get("type") == "BlockStatement" else [cons]
+                    _process_stmts(inner)
+                if alt:
+                    inner = alt.get("body", []) if alt.get("type") == "BlockStatement" else [alt]
+                    _process_stmts(inner)
+
+            # ── While / do-while ──────────────────────────────────────────────
+            elif ntype in ("WhileStatement", "DoWhileStatement"):
+                body = node.get("body", {})
+                if body:
+                    inner = body.get("body", []) if body.get("type") == "BlockStatement" else [body]
+                    _process_stmts(inner)
+
+            # ── Try / catch / finally ─────────────────────────────────────────
+            elif ntype == "TryStatement":
+                block = node.get("block", {})
+                handler = node.get("handler")
+                finalizer = node.get("finalizer")
+                if block:
+                    _process_stmts(block.get("body", []))
+                if handler:
+                    param = handler.get("param", {})
+                    if param and param.get("type") == "Identifier":
+                        # Exception object is controlled input in some contexts
+                        pass
+                    _process_stmts(handler.get("body", {}).get("body", []))
+                if finalizer:
+                    _process_stmts(finalizer.get("body", []))
+
+            # ── Block statement ───────────────────────────────────────────────
+            elif ntype == "BlockStatement":
+                _process_stmts(node.get("body", []))
+
+            # ── Switch statement ──────────────────────────────────────────────
+            elif ntype == "SwitchStatement":
+                for case in node.get("cases", []):
+                    _process_stmts(case.get("consequent", []))
+
+    # Fixed-point: repeat until tainted set stabilises
+    while True:
+        prev = len(tainted)
+        _process_stmts(body_nodes)
+        if len(tainted) == prev:
+            break
+
+    return tainted
+
+
+# JS function summary for inter-procedural taint
+class JsFuncSummary:
+    __slots__ = ("name", "tainted_params", "returns_tainted")
+
+    def __init__(self, name: str, tainted_params: set[int], returns_tainted: bool):
+        self.name = name
+        self.tainted_params: set[int] = tainted_params
+        self.returns_tainted: bool = returns_tainted
+
+
+def _js_collect_functions(root: dict) -> list[dict]:
+    """Return all function nodes in the AST."""
+    results = []
+    for n in _js_walk(root):
+        if n.get("type") in ("FunctionDeclaration", "FunctionExpression",
+                              "ArrowFunctionExpression"):
+            results.append(n)
+    return results
+
+
+def _js_func_name(func: dict) -> str:
+    """Best-effort function name extraction."""
+    if func.get("type") == "FunctionDeclaration":
+        id_node = func.get("id")
+        if id_node and id_node.get("type") == "Identifier":
+            return id_node["name"]
+    return ""
+
+
+def _js_get_body_nodes(func: dict) -> list[dict]:
+    """Return the flat body node list of a function."""
+    body = func.get("body", {})
+    if isinstance(body, dict) and body.get("type") == "BlockStatement":
+        return body.get("body", [])
+    return []
+
+
+def _js_build_func_summaries(root: dict) -> dict[str, JsFuncSummary]:
+    """
+    Two-pass JS function summary builder.
+    Pass 1: find functions whose return values are tainted (no cross-function knowledge).
+    Pass 2: build full summaries knowing which functions return tainted values.
+    """
+    funcs = _js_collect_functions(root)
+
+    # Pass 1 — tainted return names
+    tainted_returns: set[str] = set()
+    for func in funcs:
+        params = [p.get("name", "") for p in func.get("params", [])
+                  if p.get("type") == "Identifier"]
+        body_nodes = _js_get_body_nodes(func)
+        seed: set[str] = set()
+        for i, p in enumerate(params):
+            if p in ("req", "request", "ctx", "context", "e", "event"):
+                seed.add(p)
+        tainted = _js_propagate_in_scope(body_nodes, seed)
+        for n in _js_walk({"type": "Program", "body": body_nodes}):
+            if n.get("type") == "ReturnStatement":
+                arg = n.get("argument")
+                if arg and (_js_is_source(arg) or _js_uses_tainted(arg, tainted)):
+                    name = _js_func_name(func)
+                    if name:
+                        tainted_returns.add(name)
+
+    # Pass 2 — full summaries with cross-function taint
+    summaries: dict[str, JsFuncSummary] = {}
+    for func in funcs:
+        name = _js_func_name(func)
+        params = [p.get("name", "") for p in func.get("params", [])
+                  if p.get("type") == "Identifier"]
+        body_nodes = _js_get_body_nodes(func)
+
+        # For each param, check if it reaches a sink when tainted
+        tainted_params: set[int] = set()
+        for i, p in enumerate(params):
+            if not p:
+                continue
+            seed_tainted = _js_propagate_in_scope(body_nodes, {p} | {
+                pn for pn in params if pn in ("req", "request", "ctx", "context", "e", "event")
+            })
+            for n in _js_walk({"type": "Program", "body": body_nodes}):
+                if n.get("type") != "CallExpression":
+                    continue
+                callee = n.get("callee", {})
+                call_name = _js_member_chain(callee)
+                last = call_name.rsplit(".", 1)[-1] if call_name else ""
+                args = n.get("arguments", [])
+                if any(_js_uses_tainted(a, seed_tainted) for a in args):
+                    for _, _, sink_names, _ in _JS_AST_SINKS:
+                        if call_name in sink_names or last in sink_names:
+                            tainted_params.add(i)
+                            break
+
+        # Check if function returns tainted value (with cross-function knowledge)
+        seed_req: set[str] = set()
+        for p in params:
+            if p in ("req", "request", "ctx", "context", "e", "event"):
+                seed_req.add(p)
+        extra_sources = tainted_returns  # functions that return tainted
+        all_tainted = _js_propagate_in_scope(body_nodes, seed_req)
+        returns_tainted = False
+        for n in _js_walk({"type": "Program", "body": body_nodes}):
+            if n.get("type") == "ReturnStatement":
+                arg = n.get("argument")
+                if arg and (_js_is_source(arg) or _js_uses_tainted(arg, all_tainted)):
+                    returns_tainted = True
+                    break
+
+        if name:
+            summaries[name] = JsFuncSummary(name, tainted_params, returns_tainted)
+
+    return summaries
+
+
+def _js_check_sinks(
+    body_nodes: list[dict],
+    tainted: set[str],
+    func_summaries: dict[str, "JsFuncSummary"],
+    lines: list[str],
+    findings: list,
+    reported: set,
+    path: "Path",
+) -> None:
+    """
+    Walk body_nodes checking calls against sinks.
+    Also checks inter-procedural: calls to functions with tainted_params summaries.
+    Also checks dangerous property assignments (innerHTML etc.).
+    """
+    for node in body_nodes:
+        for n in _js_walk(node):
+            ntype = n.get("type", "")
+
+            # ── Call expression → sink matching ──────────────────────────────
+            if ntype == "CallExpression":
+                callee = n.get("callee", {})
+                if callee.get("type") == "Identifier":
+                    call_name = callee["name"]
+                elif callee.get("type") == "MemberExpression":
+                    call_name = _js_member_chain(callee)
+                else:
+                    call_name = ""
+
+                if not call_name:
+                    continue
+
+                last = call_name.rsplit(".", 1)[-1]
+                args = n.get("arguments", [])
+
+                # Direct sink
+                if any(_js_uses_tainted(a, tainted) for a in args):
+                    for rule_id, severity, sink_names, message in _JS_AST_SINKS:
+                        if call_name not in sink_names and last not in sink_names:
+                            continue
+                        loc = n.get("loc", {})
+                        lineno = loc.get("start", {}).get("line", 0)
+                        key = (lineno, rule_id)
+                        if key in reported:
+                            continue
+                        reported.add(key)
+                        snippet = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ""
+                        cwe, owasp = RULE_META.get(rule_id, ("", ""))
+                        findings.append(Finding(
+                            file=str(path), line=lineno,
+                            severity=severity, rule_id=rule_id,
+                            language="javascript",
+                            message=message + " (JS taint)",
+                            code_snippet=snippet[:120],
+                            confidence="HIGH",
+                            cwe=cwe, owasp=owasp,
+                        ))
+
+                # Inter-procedural: tainted arg → known sink-reaching param
+                summary = func_summaries.get(last) or func_summaries.get(call_name)
+                if summary and summary.tainted_params:
+                    for param_idx in summary.tainted_params:
+                        if param_idx < len(args) and _js_uses_tainted(args[param_idx], tainted):
+                            loc = n.get("loc", {})
+                            lineno = loc.get("start", {}).get("line", 0)
+                            key = (lineno, "SEC004T_INTERPROC")
+                            if key not in reported:
+                                reported.add(key)
+                                snippet = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ""
+                                findings.append(Finding(
+                                    file=str(path), line=lineno,
+                                    severity="HIGH", rule_id="SEC004T",
+                                    language="javascript",
+                                    message=f"Tainted argument flows into sink via {summary.name}() (inter-procedural)",
+                                    code_snippet=snippet[:120],
+                                    confidence="HIGH",
+                                    cwe="CWE-89", owasp="A03:2021",
+                                ))
+                            break
+
+            # ── Assignment to dangerous properties ────────────────────────────
+            elif ntype == "AssignmentExpression":
+                lhs = n.get("left", {})
+                rhs = n.get("right", {})
+                if lhs.get("type") != "MemberExpression":
+                    continue
+                prop = lhs.get("property", {}).get("name", "")
+                if prop not in ("innerHTML", "outerHTML", "src", "href", "action",
+                                "data", "srcdoc", "textContent"):
+                    continue
+                if not _js_uses_tainted(rhs, tainted):
+                    continue
+                rule_id = "SEC006T" if prop in ("innerHTML", "outerHTML", "srcdoc") else "SEC056T"
+                severity = "HIGH"
+                msg = f"XSS — tainted value assigned to .{prop}" if rule_id == "SEC006T" else \
+                      f"Open redirect or injection — tainted value assigned to .{prop}"
+                loc = n.get("loc", {})
+                lineno = loc.get("start", {}).get("line", 0)
+                key = (lineno, rule_id)
+                if key not in reported:
+                    reported.add(key)
+                    snippet = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ""
+                    cwe, owasp = RULE_META.get(rule_id, ("CWE-79", "A03:2021"))
+                    findings.append(Finding(
+                        file=str(path), line=lineno,
+                        severity=severity, rule_id=rule_id,
+                        language="javascript",
+                        message=msg + " (JS taint)",
+                        code_snippet=snippet[:120],
+                        confidence="HIGH",
+                        cwe=cwe, owasp=owasp,
+                    ))
+
+
+def scan_js_ast(path: Path) -> list[Finding]:
+    """
+    AST-based inter-procedural taint analysis for JavaScript files using esprima.
+
+    Improvements over baseline:
+    - Destructuring patterns (const { body } = req)
+    - Nested scopes (if/for/while/try)
+    - Spread / await / rest elements
+    - Type-safe transforms suppress taint (parseInt, encodeURIComponent, DOMPurify)
+    - Object property tracking (this.field = tainted)
+    - Inter-procedural: function summaries map which params reach sinks
+    - 30+ taint sources covering Express, Koa, Fastify, DOM, WebSocket, process.env
+    - 40+ sink functions covering SQLi, CMDi, path traversal, XSS, SSRF, SSTI
+    """
+    esp = _get_esprima()
+    if esp is None:
+        return []
+
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+
+    try:
+        root_dict = esp.parseScript(source, tolerant=True, loc=True).toDict()
+    except Exception:
+        try:
+            root_dict = esp.parseModule(source, tolerant=True, loc=True).toDict()
+        except Exception:
+            return []
+
+    lines = source.splitlines()
+    findings: list[Finding] = []
+    reported: set[tuple] = set()
+
+    # Build inter-procedural function summaries for this file
+    func_summaries = _js_build_func_summaries(root_dict)
+
+    # Seed names that indicate the parameter IS the request object
+    _REQ_PARAM_NAMES = frozenset({
+        "req", "request", "ctx", "context", "e", "event",
+        "msg", "message", "data",
+    })
+
+    def _scan_scope(params: list[str], body_nodes: list[dict],
+                    extra_tainted: set[str] | None = None) -> None:
+        seed: set[str] = set(extra_tainted or set())
+        for p in params:
+            if p in _REQ_PARAM_NAMES:
+                seed.add(p)
+
+        tainted = _js_propagate_in_scope(body_nodes, seed)
+
+        # Inter-procedural: mark vars that come from tainted-return functions as tainted
+        for n in _js_walk({"type": "Program", "body": body_nodes}):
+            if n.get("type") == "VariableDeclarator":
+                init = n.get("init", {})
+                if init and init.get("type") == "CallExpression":
+                    callee = init.get("callee", {})
+                    fn_name = _js_member_chain(callee)
+                    last = fn_name.rsplit(".", 1)[-1] if fn_name else ""
+                    summary = func_summaries.get(fn_name) or func_summaries.get(last)
+                    if summary and summary.returns_tainted:
+                        for name in _js_pattern_names(n.get("id", {})):
+                            tainted.add(name)
+
+        if not tainted:
+            return
+
+        _js_check_sinks(body_nodes, tainted, func_summaries, lines,
+                        findings, reported, path)
+
+    def _visit(node: dict) -> None:
+        ntype = node.get("type", "")
+        if ntype in ("FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"):
+            params = []
+            for p in node.get("params", []):
+                params += _js_pattern_names(p)
+            body_nodes = _js_get_body_nodes(node)
+            if body_nodes:
+                _scan_scope(params, body_nodes)
+        for v in node.values():
+            if isinstance(v, dict) and "type" in v:
+                _visit(v)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict) and "type" in item:
+                        _visit(item)
+
+    # Top-level statements (script mode — no enclosing function)
+    _scan_scope([], root_dict.get("body", []))
+
+    # All nested functions
+    _visit(root_dict)
+
+    return findings
+
+
 def scan_with_regex(path: Path, language: str) -> list[Finding]:
     findings: list[Finding] = []
-    rules = RULES.get(language, [])
+    # Use pre-compiled rules for performance; fall back gracefully if language unknown
+    if not _COMPILED_RULES.get(language):
+        return []
     try:
         source = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
@@ -1832,8 +4210,8 @@ def scan_with_regex(path: Path, language: str) -> list[Finding]:
 
         skip_for_lang = _RULE_SKIP.get(language, {})
 
-        for rule_id, severity, pattern, message in rules:
-            m = re.search(pattern, line, re.IGNORECASE)
+        for rule_id, severity, compiled_pat, message in _COMPILED_RULES.get(language, []):
+            m = compiled_pat.search(line)
             if not m:
                 continue
 
@@ -1899,6 +4277,144 @@ def scan_python_ast(path: Path) -> list[Finding]:
     return findings
 
 
+def scan_structural_python(path: Path) -> list[Finding]:
+    """
+    Scan a Python file using structural (AST) pattern matching.
+    Produces HIGH-confidence findings — patterns match code structure, not text.
+    """
+    rules = STRUCTURAL_RULES.get("python", [])
+    if not rules:
+        return []
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        lines = source.splitlines()
+        tree = ast.parse(source)
+    except (SyntaxError, OSError):
+        return []
+
+    findings: list[Finding] = []
+    reported: set[tuple[int, str]] = set()
+
+    def _emit(node: ast.AST, rule: StructuralRule, bindings: dict) -> None:
+        # pattern-not: skip if any negative pattern matches this node
+        if any(match_py_pattern(neg, node) is not None for neg in rule.pattern_not):
+            return
+        # metavar-regex conditions
+        for var, compiled_re in rule.metavar_regex.items():
+            bound = bindings.get(var)
+            if bound is None:
+                continue
+            val_src = ast.unparse(bound) if hasattr(ast, "unparse") else ""
+            if not compiled_re.search(val_src):
+                return
+        lineno = getattr(node, "lineno", 0)
+        key = (lineno, rule.id)
+        if key in reported:
+            return
+        reported.add(key)
+        snippet = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ""
+        findings.append(Finding(
+            file=str(path), line=lineno,
+            severity=rule.severity, rule_id=rule.id,
+            language="python", message=rule.message,
+            code_snippet=snippet[:120],
+            confidence="HIGH",
+            cwe=rule.cwe, owasp=rule.owasp,
+        ))
+
+    for rule in rules:
+        # ── Pre-compute context nodes for pattern-inside / pattern-not-inside ──
+        ctx_nodes: list | None = None
+        excl_nodes: list | None = None
+        if rule.pattern_inside is not None:
+            ctx_nodes = _collect_inside_nodes(rule.pattern_inside, tree)
+            if not ctx_nodes:
+                continue  # required context absent — skip entire rule
+        if rule.pattern_not_inside is not None:
+            excl_nodes = _collect_inside_nodes(rule.pattern_not_inside, tree)
+
+        # ── Expression patterns ───────────────────────────────────────────────
+        patterns_to_try = rule.pattern_either if rule.pattern_either else (
+            [rule.pattern] if rule.pattern else []
+        )
+        for pat in patterns_to_try:
+            for node, bindings in find_py_pattern(pat, tree):
+                if ctx_nodes is not None and not _is_descendant_of_any(node, ctx_nodes):
+                    continue
+                if excl_nodes and _is_descendant_of_any(node, excl_nodes):
+                    continue
+                _emit(node, rule, bindings)
+
+        # ── Statement-sequence patterns ───────────────────────────────────────
+        if rule.stmt_pattern:
+            for first_stmt, bindings in find_py_stmt_pattern(rule.stmt_pattern, tree):
+                if ctx_nodes is not None and not _is_descendant_of_any(first_stmt, ctx_nodes):
+                    continue
+                if excl_nodes and _is_descendant_of_any(first_stmt, excl_nodes):
+                    continue
+                _emit(first_stmt, rule, bindings)
+
+    return findings
+
+
+def scan_structural_js(path: Path) -> list[Finding]:
+    """
+    Scan a JavaScript/TypeScript file using structural pattern matching via esprima.
+    Produces HIGH-confidence findings.
+    """
+    _ensure_js_structural_rules()
+    rules = STRUCTURAL_RULES.get("javascript", [])
+    if not rules:
+        return []
+
+    esp = _get_esprima()
+    if esp is None:
+        return []
+
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+
+    try:
+        root_dict = esp.parseScript(source, tolerant=True, loc=True).toDict()
+    except Exception:
+        try:
+            root_dict = esp.parseModule(source, tolerant=True, loc=True).toDict()
+        except Exception:
+            return []
+
+    lines = source.splitlines()
+    findings: list[Finding] = []
+    reported: set[tuple[int, str]] = set()
+
+    for rule in rules:
+        patterns_to_try = rule.pattern_either if rule.pattern_either else ([rule.pattern] if rule.pattern else [])
+        for pat in patterns_to_try:
+            if pat is None:
+                continue
+            for node, bindings in find_js_pattern(pat, root_dict):
+                if any(match_js_pattern(neg, node) is not None for neg in rule.pattern_not):
+                    continue
+                loc = node.get("loc", {})
+                lineno = loc.get("start", {}).get("line", 0)
+                key = (lineno, rule.id)
+                if key in reported:
+                    continue
+                reported.add(key)
+                snippet = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ""
+                findings.append(Finding(
+                    file=str(path), line=lineno,
+                    severity=rule.severity, rule_id=rule.id,
+                    language="javascript", message=rule.message,
+                    code_snippet=snippet[:120],
+                    confidence="HIGH",
+                    cwe=rule.cwe, owasp=rule.owasp,
+                ))
+
+    return findings
+
+
 def _detect_language(path: Path) -> str | None:
     """
     Resolve the scanner language for a file, including IaC formats.
@@ -1930,17 +4446,22 @@ def scan_file(
     path: Path,
     taint_window: int = 25,
     cross_file_funcs: frozenset[str] = frozenset(),
+    func_summaries: "dict[str, FuncSummary] | None" = None,
 ) -> list[Finding]:
     """
     Run all scan engines for the given file and return deduplicated findings.
 
     Engines (in order, each de-duplicated by (line, rule_id)):
-      1. scan_with_regex       — fast pattern matching with context filtering
-      2. scan_entropy          — Shannon-entropy secret detection (all languages)
-      3. scan_multiline        — multi-line/logical-line injection rules (non-Python)
-      4. scan_python_ast       — Python AST: assert-statement detection
-      5. scan_python_ast_taint — Python AST: intra+inter-procedural + cross-file taint
-      6. scan_taint            — cross-line sliding-window taint (all languages)
+      1. scan_with_regex         — fast pattern matching with context filtering
+      2. scan_entropy            — Shannon-entropy secret detection (all languages)
+      3. scan_multiline          — multi-line/logical-line injection rules (non-Python)
+      4. scan_python_ast         — Python AST: assert-statement detection
+      5. scan_python_ast_taint   — Python AST: intra+inter-procedural + cross-file taint
+      6. scan_interprocedural    — inter-procedural taint via function summaries (Python)
+      7. scan_js_ast             — JavaScript AST taint analysis via esprima
+      8. scan_taint              — cross-line sliding-window taint (all languages)
+      9. scan_structural_python  — structural (AST) pattern matching for Python (HIGH confidence)
+     10. scan_structural_js      — structural (AST) pattern matching for JS (HIGH confidence)
     """
     language = _detect_language(path)
     if not language:
@@ -1964,7 +4485,19 @@ def scan_file(
         _merge(scan_python_ast(path))
         _merge(scan_python_ast_taint(path, cross_file_funcs=cross_file_funcs))
 
+    if language == "python" and func_summaries:
+        _merge(scan_interprocedural(path, func_summaries, cross_file_funcs=cross_file_funcs))
+
+    if language == "javascript":
+        _merge(scan_js_ast(path))
+
     _merge(scan_taint(path, language, taint_window=taint_window))
+
+    # Structural (AST) pattern matching — always HIGH confidence, "S"-suffixed IDs
+    if language == "python":
+        _merge(scan_structural_python(path))
+    if language == "javascript":
+        _merge(scan_structural_js(path))
 
     return findings
 
@@ -2003,19 +4536,66 @@ def _load_yaml_rules(rule_files: list[str]) -> None:
             continue
 
         loaded = 0
-        for rule in (data or {}).get("rules", []):
-            rid      = str(rule.get("id", "")).strip()
-            lang     = str(rule.get("language", "")).strip().lower()
-            severity = str(rule.get("severity", "MEDIUM")).strip().upper()
-            pattern  = str(rule.get("pattern", "")).strip()
-            message  = str(rule.get("message", "Custom rule")).strip()
-            cwe      = str(rule.get("cwe", "")).strip()
-            owasp    = str(rule.get("owasp", "")).strip()
+        for rule_def in (data or {}).get("rules", []):
+            rid      = str(rule_def.get("id", "")).strip()
+            lang     = str(rule_def.get("language", "")).strip().lower()
+            severity = str(rule_def.get("severity", "MEDIUM")).strip().upper()
+            message  = str(rule_def.get("message", "Custom rule")).strip()
+            cwe      = str(rule_def.get("cwe", "")).strip()
+            owasp    = str(rule_def.get("owasp", "")).strip()
 
-            if not rid or not lang or not pattern:
-                print(f"Warning: skipping malformed rule in {rule_file!r}: {rule}")
+            if not rid or not lang:
+                print(f"Warning: skipping malformed rule in {rule_file!r}: {rule_def}")
+                continue
+
+            # Check if this is a structural rule (has 'pattern' as AST pattern, not regex)
+            if "pattern" in rule_def or "pattern_either" in rule_def:
+                is_structural = (
+                    lang in ("python", "javascript") and
+                    not str(rule_def.get("pattern", "")).startswith("^") and
+                    # Heuristic: structural patterns don't have regex anchors/escapes
+                    "\\b" not in str(rule_def.get("pattern", "")) and
+                    "\\s" not in str(rule_def.get("pattern", "")) and
+                    "$" in str(rule_def.get("pattern", ""))  # must have metavar
+                )
+                if is_structural:
+                    raw_rule: dict = {
+                        "id": rid,
+                        "language": lang,
+                        "severity": severity,
+                        "message": message,
+                        "cwe": cwe,
+                        "owasp": owasp,
+                    }
+                    if "pattern" in rule_def:
+                        raw_rule["pattern"] = rule_def["pattern"]
+                    if "pattern_not" in rule_def:
+                        pn = rule_def["pattern_not"]
+                        raw_rule["pattern_not"] = pn if isinstance(pn, list) else [pn]
+                    if "pattern_either" in rule_def:
+                        raw_rule["pattern_either"] = rule_def["pattern_either"]
+                    try:
+                        new_compiled = _compile_structural_rules([raw_rule])
+                        for l, srules in new_compiled.items():
+                            STRUCTURAL_RULES.setdefault(l, []).extend(srules)
+                        RULE_META.setdefault(rid, (cwe, owasp))
+                        loaded += 1
+                        continue
+                    except Exception:
+                        pass  # fall through to regex loading
+
+            # Regular regex rule
+            pattern = str(rule_def.get("pattern", "")).strip()
+            if not pattern:
+                print(f"Warning: skipping malformed rule in {rule_file!r}: {rule_def}")
                 continue
             RULES.setdefault(lang, []).append((rid, severity, pattern, message))
+            # Also add to compiled rules for the language
+            try:
+                compiled_pat = re.compile(pattern, re.IGNORECASE)
+                _COMPILED_RULES.setdefault(lang, []).append((rid, severity, compiled_pat, message))
+            except re.error:
+                pass
             RULE_META.setdefault(rid, (cwe, owasp))
             loaded += 1
         print(f"  Loaded {loaded} custom rules from {rule_file}")
@@ -2294,6 +4874,297 @@ def _build_cross_file_taint_map(files: list[Path]) -> frozenset[str]:
     return frozenset(tainted_funcs)
 
 
+# ── Inter-procedural call graph & function taint summaries ─────────────────────────
+
+@dataclass
+class FuncSummary:
+    """
+    Taint signature for a single function.
+    sink_params maps parameter index to list of (rule_id, severity, message)
+    for sinks that are reachable when that parameter is tainted.
+    """
+    name: str
+    file: Path
+    params: list
+    # param_index → list of (rule_id, severity, message)
+    sink_params: dict
+    returns_tainted: bool
+    lineno: int
+
+
+def _propagate_taint_from_seed(
+    func: "ast.FunctionDef | ast.AsyncFunctionDef",
+    seed: set[str],
+    known_tainted_funcs: frozenset[str] = frozenset(),
+) -> set[str]:
+    """
+    Same as _propagate_taint but starts from an explicit seed set instead of
+    looking for request.* sources. Used for computing per-parameter taint flows.
+
+    A2: Pre-extract all assignment-like nodes once — O(N) instead of O(N×K).
+    Also handles AugAssign, Attribute alias, and container mutation (same as
+    _propagate_taint).
+    """
+    # Pre-extract all assignment-like nodes once
+    assign_nodes: list[tuple[ast.expr, list[ast.expr]]] = []
+    mutation_calls: list[tuple[str, ast.expr]] = []
+
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign):
+            assign_nodes.append((node.value, node.targets))
+        elif isinstance(node, ast.AnnAssign) and node.value:
+            assign_nodes.append((node.value, [node.target]))
+        elif isinstance(node, ast.NamedExpr):
+            assign_nodes.append((node.value, [node.target]))
+        elif isinstance(node, ast.AugAssign):
+            assign_nodes.append((node.value, [node.target]))
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr in ("append", "extend", "update", "add")
+                and isinstance(call.func.value, ast.Name)
+                and call.args
+            ):
+                mutation_calls.append((call.func.value.id, call.args[0]))
+
+    tainted = set(seed)
+    while True:
+        prev = len(tainted)
+        for rhs, targets in assign_nodes:
+            is_tainted = _uses_tainted(rhs, tainted)
+            if not is_tainted and known_tainted_funcs and isinstance(rhs, ast.Call):
+                cn = _py_call_name(rhs)
+                if cn in known_tainted_funcs or cn.rsplit(".", 1)[-1] in known_tainted_funcs:
+                    is_tainted = True
+            if is_tainted:
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        tainted.add(t.id)
+                    elif isinstance(t, (ast.Tuple, ast.List)):
+                        for elt in t.elts:
+                            if isinstance(elt, ast.Name):
+                                tainted.add(elt.id)
+                    elif isinstance(t, ast.Attribute):
+                        tainted.add("attr:" + _dotted_name(t))
+
+        for container_name, arg_node in mutation_calls:
+            if _uses_tainted(arg_node, tainted):
+                tainted.add(container_name)
+
+        if len(tainted) == prev:
+            break
+    return tainted
+
+
+def _compute_func_summary(
+    func: "ast.FunctionDef | ast.AsyncFunctionDef",
+    file: Path,
+    known_tainted_funcs: frozenset[str] = frozenset(),
+) -> FuncSummary:
+    """
+    For each parameter of `func`, hypothetically treat it as a taint source
+    and check if any sink in _PY_SINK_TABLE becomes reachable.
+    This builds a per-function taint signature used for inter-procedural analysis.
+    """
+    params = [arg.arg for arg in func.args.args]
+    # Skip 'self' and 'cls' as they are not data parameters
+    data_params = [(i, p) for i, p in enumerate(params) if p not in ("self", "cls")]
+    sink_params: dict[int, list[tuple[str, str, str]]] = {}
+
+    for i, param_name in data_params:
+        seed = {param_name}
+        tainted = _propagate_taint_from_seed(func, seed, known_tainted_funcs)
+
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            all_args = list(node.args) + [kw.value for kw in node.keywords]
+            if not any(_uses_tainted(a, tainted) for a in all_args):
+                continue
+            call_name = _py_call_name(node)
+            last = call_name.rsplit(".", 1)[-1]
+            for rule_id, severity, sink_names, message in _PY_SINK_TABLE:
+                if call_name in sink_names or last in sink_names:
+                    sink_params.setdefault(i, []).append((rule_id, severity, message))
+                    break
+
+    # Check if the function returns tainted data (for cross-file propagation)
+    base_tainted = _propagate_taint(func, known_tainted_funcs)
+    returns_tainted = False
+    for node in ast.walk(func):
+        if isinstance(node, ast.Return) and node.value is not None:
+            if _is_py_source(node.value) or (base_tainted and _uses_tainted(node.value, base_tainted)):
+                returns_tainted = True
+                break
+
+    return FuncSummary(
+        name=func.name,
+        file=file,
+        params=params,
+        sink_params=sink_params,
+        returns_tainted=returns_tainted,
+        lineno=func.lineno,
+    )
+
+
+def _build_func_summaries(files: list[Path]) -> dict[str, "FuncSummary"]:
+    """
+    First pass: collect tainted-return function names.
+    Second pass: build full summaries with inter-function knowledge.
+
+    Returns {func_name: FuncSummary} for all Python functions found in files.
+
+    Keys stored for each function:
+    - ``func_name``           — bare function name (original behaviour)
+    - ``module.func_name``    — module-qualified (file stem + "." + name)
+    - ``ClassName.func_name`` — class-qualified (for methods inside a class)
+    """
+    # Pass 1: collect functions whose return values are tainted
+    tainted_return: set[str] = set()
+    # Store (path, func_node, class_name_or_None) so we can build qualified keys
+    func_nodes: list[tuple[Path, "ast.FunctionDef | ast.AsyncFunctionDef", str | None]] = []
+
+    for path in files:
+        if not path.suffix == ".py":
+            continue
+        try:
+            source = path.read_text(encoding="utf-8", errors="ignore")
+            tree = ast.parse(source)
+        except (SyntaxError, OSError):
+            continue
+
+        # Build a parent-map so we can determine if a FunctionDef is inside a ClassDef
+        parent_map: dict[int, ast.AST] = {}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parent_map[id(child)] = parent
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Determine class context (direct parent only)
+                parent = parent_map.get(id(node))
+                class_name: str | None = None
+                if isinstance(parent, ast.ClassDef):
+                    class_name = parent.name
+                func_nodes.append((path, node, class_name))
+                tainted = _propagate_taint(node, frozenset())
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Return) and child.value is not None:
+                        if _is_py_source(child.value) or (tainted and _uses_tainted(child.value, tainted)):
+                            tainted_return.add(node.name)
+                            break
+
+    frozen_tainted = frozenset(tainted_return)
+
+    # Pass 2: build full summaries with inter-procedural knowledge
+    summaries: dict[str, FuncSummary] = {}
+    for path, func, class_name in func_nodes:
+        summary = _compute_func_summary(func, path, frozen_tainted)
+        module_stem = path.stem  # e.g. "views" from "views.py"
+
+        # Register under bare name (original behaviour — keeps backward compat)
+        summaries[func.name] = summary
+        # Register under module-qualified name: "views.process"
+        summaries[f"{module_stem}.{func.name}"] = summary
+        # Register under class-qualified name: "MyView.process"
+        if class_name:
+            summaries[f"{class_name}.{func.name}"] = summary
+
+    return summaries
+
+
+def scan_interprocedural(
+    path: Path,
+    func_summaries: "dict[str, FuncSummary]",
+    cross_file_funcs: frozenset[str] = frozenset(),
+) -> list[Finding]:
+    """
+    Inter-procedural taint analysis: detect call sites where tainted arguments
+    are passed to functions whose summaries indicate those params reach a sink.
+
+    This catches patterns that single-file analysis misses, e.g.:
+        # file a.py
+        def process(user_input):           # param 0 → SQL sink
+            db.execute("SELECT " + user_input)
+
+        # file b.py
+        name = request.args.get("name")
+        process(name)                      # ← flagged here
+    """
+    if not func_summaries:
+        return []
+
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        lines = source.splitlines()
+        tree = ast.parse(source)
+    except (SyntaxError, OSError):
+        return []
+
+    findings: list[Finding] = []
+    reported: set[tuple[int, str]] = set()
+
+    all_funcs = [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+    for func in all_funcs:
+        tainted = _propagate_taint(func, cross_file_funcs)
+        if not tainted:
+            continue
+
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            call_name = _py_call_name(node)
+            last = call_name.rsplit(".", 1)[-1]
+
+            # Resolve summary: try full name first, then last component (method name),
+            # and also the full dotted name (covers ClassName.method and module.func).
+            summary = (
+                func_summaries.get(call_name)
+                or func_summaries.get(last)
+            )
+            if not summary or not summary.sink_params:
+                continue
+
+            # Exclude self-calls (recursive)
+            if summary.name == func.name:
+                continue
+
+            for arg_idx, arg_node in enumerate(node.args):
+                if arg_idx not in summary.sink_params:
+                    continue
+                if not _uses_tainted(arg_node, tainted):
+                    continue
+                for rule_id, severity, message in summary.sink_params[arg_idx]:
+                    key = (node.lineno, rule_id)
+                    if key in reported:
+                        continue
+                    reported.add(key)
+                    snippet = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+                    cwe, owasp = RULE_META.get(rule_id, ("", ""))
+                    findings.append(Finding(
+                        file=str(path),
+                        line=node.lineno,
+                        severity=severity,
+                        rule_id=rule_id,
+                        language="python",
+                        message=(
+                            f"{message} — tainted arg passed to '{summary.name}' "
+                            f"(defined in {summary.file.name}, line {summary.lineno})"
+                        ),
+                        code_snippet=snippet[:120],
+                        confidence="HIGH",
+                        cwe=cwe,
+                        owasp=owasp,
+                    ))
+
+    return findings
+
+
 # ── SCA — Software Composition Analysis via OSV ───────────────────────────────
 
 import urllib.request
@@ -2509,8 +5380,14 @@ def _scan_file_worker(
     path: Path,
     taint_window: int,
     cross_file_funcs: frozenset[str],
+    func_summaries: "dict[str, FuncSummary] | None" = None,
 ) -> list[Finding]:
-    return scan_file(path, taint_window=taint_window, cross_file_funcs=cross_file_funcs)
+    return scan_file(
+        path,
+        taint_window=taint_window,
+        cross_file_funcs=cross_file_funcs,
+        func_summaries=func_summaries,
+    )
 
 
 def scan_files_parallel(
@@ -2518,6 +5395,7 @@ def scan_files_parallel(
     taint_window: int = 25,
     cross_file_funcs: frozenset[str] = frozenset(),
     jobs: int = 4,
+    func_summaries: "dict[str, FuncSummary] | None" = None,
 ) -> list[Finding]:
     """
     Scan a list of files in parallel using a thread pool.
@@ -2528,7 +5406,7 @@ def scan_files_parallel(
     results: list[Finding] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = {
-            pool.submit(_scan_file_worker, f, taint_window, cross_file_funcs): f
+            pool.submit(_scan_file_worker, f, taint_window, cross_file_funcs, func_summaries): f
             for f in files
         }
         for fut in concurrent.futures.as_completed(futures):
@@ -2877,14 +5755,22 @@ Examples:
         print(f"Error: {root} is not a valid file or directory")
         sys.exit(1)
 
-    # Cross-file taint pre-pass (Python only) — build set of tainted function names
+    # Cross-file taint pre-pass (Python only) — build inter-procedural function summaries
     python_files = [f for f in scan_files if f.suffix == ".py"]
     cross_file_funcs: frozenset[str] = frozenset()
+    func_summaries: dict[str, FuncSummary] = {}
     if python_files:
         print(f"  Cross-file taint: analysing {len(python_files)} Python file(s) …")
-        cross_file_funcs = _build_cross_file_taint_map(python_files)
-        if cross_file_funcs:
-            print(f"  Cross-file taint: {len(cross_file_funcs)} taint-source function(s) found across files")
+        func_summaries = _build_func_summaries(python_files)
+        cross_file_funcs = frozenset(
+            name for name, s in func_summaries.items() if s.returns_tainted
+        )
+        sink_funcs = sum(1 for s in func_summaries.values() if s.sink_params)
+        print(
+            f"  Inter-procedural: {len(func_summaries)} functions analysed, "
+            f"{len(cross_file_funcs)} return tainted data, "
+            f"{sink_funcs} have sink-reaching parameters"
+        )
 
     # Parallel file scanning
     jobs = max(1, args.jobs)
@@ -2893,12 +5779,14 @@ Examples:
         all_findings: list[Finding] = scan_files_parallel(
             scan_files, taint_window=args.taint_window,
             cross_file_funcs=cross_file_funcs, jobs=jobs,
+            func_summaries=func_summaries,
         )
     else:
         all_findings = []
         for f in scan_files:
             all_findings.extend(scan_file(f, taint_window=args.taint_window,
-                                          cross_file_funcs=cross_file_funcs))
+                                          cross_file_funcs=cross_file_funcs,
+                                          func_summaries=func_summaries))
 
     # SCA scan (dependency manifests → OSV API)
     if not args.no_sca and root.is_dir():

@@ -571,6 +571,89 @@ def _safe_extract(zip_path: Path, dest: Path) -> None:
         z.extractall(dest)
 
 
+def _push_zip(zip_path: Path, username: str, token: str, repo_url: str,
+              branch: str, commit_msg: str) -> None:
+    """Clone repo, overlay zip contents, commit, and push."""
+    import re
+    from urllib.parse import quote
+
+    if not re.fullmatch(r"[a-zA-Z0-9._/\-]+", branch):
+        raise ValueError("Invalid branch name.")
+
+    clean_url, _ = _validate_repo_url(repo_url)
+    parsed = urlparse(clean_url)
+    auth_url = (
+        f"https://{quote(username, safe='')}:{quote(token, safe='')}"
+        f"@{parsed.netloc}{parsed.path}"
+    )
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "echo",
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        clone_dir = Path(tmp) / "repo"
+
+        def _git(*args, **kw):
+            r = subprocess.run(
+                ["git"] + list(args), cwd=str(clone_dir),
+                capture_output=True, text=True, env=env, **kw
+            )
+            if r.returncode != 0:
+                out = (r.stderr or r.stdout or "").strip()
+                out = out.replace(token, "***").replace(username, "***")
+                raise RuntimeError(out)
+            return r
+
+        # Clone the target repo (use --depth 1 for speed; empty repos are fine)
+        clone_proc = subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", branch, auth_url, str(clone_dir)],
+            capture_output=True, text=True, env=env, timeout=CLONE_TIMEOUT_SECONDS,
+        )
+        if clone_proc.returncode != 0:
+            # Branch may not exist yet — clone without --branch and create it
+            clone_proc2 = subprocess.run(
+                ["git", "clone", "--depth", "1", auth_url, str(clone_dir)],
+                capture_output=True, text=True, env=env, timeout=CLONE_TIMEOUT_SECONDS,
+            )
+            if clone_proc2.returncode != 0:
+                # Repo is empty or doesn't exist — init fresh
+                clone_dir.mkdir()
+                subprocess.run(["git", "init"], cwd=str(clone_dir),
+                               capture_output=True, env=env)
+                subprocess.run(["git", "remote", "add", "origin", auth_url],
+                               cwd=str(clone_dir), capture_output=True, env=env)
+            _git("checkout", "-B", branch)
+
+        _git("config", "user.email", "scanner@git-better")
+        _git("config", "user.name", username)
+
+        # Overlay zip contents (keep .git, overwrite everything else)
+        extract_dir = Path(tmp) / "src"
+        extract_dir.mkdir()
+        _safe_extract(zip_path, extract_dir)
+        for item in clone_dir.iterdir():
+            if item.name == ".git":
+                continue
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+        shutil.copytree(str(extract_dir), str(clone_dir), dirs_exist_ok=True)
+
+        _git("add", ".")
+        # Commit only if there are staged changes
+        status = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(clone_dir), env=env, capture_output=True,
+        )
+        if status.returncode != 0:
+            _git("commit", "-m", commit_msg)
+
+        _git("push", "origin", f"HEAD:{branch}", timeout=60)
+
+
 def _validate_repo_url(url: str) -> tuple[str, str]:
     """Validate a public git URL and return (normalized_url, friendly_name)."""
     url = url.strip()
@@ -799,6 +882,13 @@ def index():
     return render_template("index.html", recent=recent)
 
 
+SCANNABLE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".php", ".java",
+    ".go", ".sh", ".bash", ".c", ".h", ".yml", ".yaml",
+    ".mk", ".mak", ".make", ".cmake",
+}
+
+
 @app.post("/upload")
 @login_required
 def upload():
@@ -819,8 +909,25 @@ def upload():
                 zip_path = Path(tmp) / "src.zip"
                 f.save(zip_path)
                 rid = _scan_zip(zip_path, name=name, source="scan")
+        elif suffix in SCANNABLE_EXTENSIONS:
+            with tempfile.TemporaryDirectory() as tmp:
+                src_path = Path(tmp) / name
+                f.save(src_path)
+                payload = _run_scanner_on_dir(Path(tmp))
+                rid = _ingest_report(name=name, source="file", payload=payload)
+                stored = UPLOAD_DIR / f"{rid}.zip"
+                with zipfile.ZipFile(stored, "w", zipfile.ZIP_DEFLATED) as z:
+                    z.write(src_path, arcname=name)
+            with Session() as s:
+                rec = s.get(Report, rid)
+                if rec is not None:
+                    rec.zip_filename = stored.name
+                    s.commit()
         else:
-            flash("Unsupported file type. Upload a scanner .json report or a .zip of source code.")
+            flash(
+                "Unsupported file type. Upload a scanner .json report, a .zip archive, "
+                "or a source file (.py, .js, .ts, .php, .java, .go, .sh, .c, .yml, …)."
+            )
             return redirect(url_for("index"))
     except Exception as e:
         flash(f"Upload failed: {e}")
@@ -903,6 +1010,31 @@ def rescan(report_id: int):
     return redirect(url_for("report", report_id=new_id))
 
 
+@app.post("/report/<int:report_id>/push")
+@login_required
+def push_to_github(report_id: int):
+    from flask import jsonify
+
+    r = _get_report_or_404(report_id)
+    username   = (request.form.get("username") or "").strip()
+    token      = (request.form.get("token") or "").strip()
+    raw_url    = (request.form.get("repo_url") or "").strip()
+    branch     = (request.form.get("branch") or "main").strip()
+    commit_msg = (request.form.get("commit_message") or "Add code via Git-better").strip()
+
+    if not username or not token:
+        return jsonify({"error": "GitHub username and token are required."}), 400
+    if not r.zip_filename or not (UPLOAD_DIR / r.zip_filename).exists():
+        return jsonify({"error": "No source archive for this report. Only zip-scanned reports can be pushed."}), 400
+
+    try:
+        _push_zip(UPLOAD_DIR / r.zip_filename, username, token, raw_url, branch, commit_msg)
+    except Exception as e:
+        return jsonify({"error": str(e).replace(token, "***")}), 400
+
+    return jsonify({"success": True, "url": raw_url.rstrip("/")})
+
+
 @app.get("/report/<int:report_id>")
 @login_required
 def report(report_id: int):
@@ -932,12 +1064,14 @@ def report(report_id: int):
     can_rescan = bool(r.repo_url) or bool(
         r.zip_filename and (UPLOAD_DIR / r.zip_filename).exists()
     )
+    can_push = bool(r.zip_filename and (UPLOAD_DIR / r.zip_filename).exists())
 
     return render_template(
         "report.html",
         r=r,
         lineage=lineage,
         can_rescan=can_rescan,
+        can_push=can_push,
         by_rule=by_rule,
         by_file=by_file,
         by_lang=by_lang,

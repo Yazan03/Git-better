@@ -16,13 +16,19 @@
 <div id="tab-file" class="upload-panel">
   <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" id="upform">
     <label class="dropzone" id="drop">
-      <input type="file" name="file" id="file" accept=".json,.zip" required>
+      <input type="file" name="file" id="file" required>
       <div><strong>Drop a file here</strong> or click to browse</div>
-      <div class="hint">A scanner <code>.json</code> report — or a <code>.zip</code> of source code we'll scan for you</div>
+      <div class="hint">
+        A scanner <code>.json</code> report, a <code>.zip</code> archive of source code,
+        or any source file: <code>.py</code> <code>.js</code> <code>.ts</code> <code>.jsx</code>
+        <code>.tsx</code> <code>.php</code> <code>.java</code> <code>.go</code>
+        <code>.sh</code> <code>.c</code> <code>.yml</code> and more
+      </div>
       <div class="filename" id="fn"></div>
     </label>
+
     <div style="margin-top: 14px; display: flex; gap: 10px;">
-      <button class="btn btn-primary" type="submit">Continue</button>
+      <button class="btn btn-primary" type="submit">Scan</button>
       <a class="btn" href="{{ url_for('reports') }}">View past reports</a>
     </div>
   </form>

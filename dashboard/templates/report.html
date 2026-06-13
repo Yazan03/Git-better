@@ -27,6 +27,11 @@
     </button>
   </form>
   {% endif %}
+  {% if can_push %}
+  <button class="btn btn-push" type="button" id="openPushModal" title="Push source code to a GitHub repository">
+    ↑ Push to GitHub
+  </button>
+  {% endif %}
   <a class="btn" href="{{ url_for('findings', report_id=r.id) }}">All findings →</a>
   <form method="post" action="{{ url_for('delete_report', report_id=r.id) }}"
         onsubmit="return confirm('Delete this report and all its findings?')" style="display:inline">
@@ -147,6 +152,52 @@
   </div>
 </div>
 
+{% if can_push %}
+<div class="modal-backdrop" id="pushModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pushModalTitle">
+    <div class="modal-head">
+      <h2 id="pushModalTitle">Push to GitHub</h2>
+      <button class="modal-close" id="closePushModal" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;gap:12px;">
+        <label class="field" style="flex:1">
+          <span class="field-label">GitHub username</span>
+          <input type="text" id="pushUsername" placeholder="your-username" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field" style="flex:1">
+          <span class="field-label">Personal access token</span>
+          <input type="password" id="pushToken" placeholder="ghp_…" autocomplete="off" spellcheck="false">
+          <span class="field-hint">Used as password. Never stored.</span>
+        </label>
+      </div>
+      <label class="field">
+        <span class="field-label">Repository URL</span>
+        <input type="url" id="pushRepoUrl"
+               placeholder="https://github.com/you/repo"
+               autocomplete="off" spellcheck="false">
+      </label>
+      <div style="display:flex;gap:12px;">
+        <label class="field" style="flex:1">
+          <span class="field-label">Branch</span>
+          <input type="text" id="pushBranch" value="main" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field" style="flex:2">
+          <span class="field-label">Commit message</span>
+          <input type="text" id="pushCommitMsg" value="Add code via Git-better" autocomplete="off">
+        </label>
+      </div>
+      <div id="pushError" class="push-error" hidden></div>
+      <div id="pushSuccess" class="push-success" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="doPush" type="button">Push</button>
+      <button class="btn" id="cancelPush" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
@@ -203,6 +254,59 @@
       },
     },
     plugins: [centerLabel],
+  });
+</script>
+{% endif %}
+
+{% if can_push %}
+<script>
+  const modal     = document.getElementById('pushModal');
+  const openBtn   = document.getElementById('openPushModal');
+  const closeBtn  = document.getElementById('closePushModal');
+  const cancelBtn = document.getElementById('cancelPush');
+  const doBtn     = document.getElementById('doPush');
+  const errBox    = document.getElementById('pushError');
+  const okBox     = document.getElementById('pushSuccess');
+
+  function openModal() { modal.removeAttribute('hidden'); document.getElementById('pushToken').focus(); }
+  function closeModal() { modal.setAttribute('hidden', ''); errBox.hidden = true; okBox.hidden = true; }
+
+  openBtn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  cancelBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+  doBtn.addEventListener('click', async () => {
+    errBox.hidden = true;
+    okBox.hidden = true;
+    doBtn.disabled = true;
+    doBtn.textContent = 'Pushing…';
+
+    const body = new FormData();
+    body.append('username',       document.getElementById('pushUsername').value);
+    body.append('token',          document.getElementById('pushToken').value);
+    body.append('repo_url',       document.getElementById('pushRepoUrl').value);
+    body.append('branch',         document.getElementById('pushBranch').value);
+    body.append('commit_message', document.getElementById('pushCommitMsg').value);
+
+    try {
+      const res  = await fetch('{{ url_for("push_to_github", report_id=r.id) }}', { method: 'POST', body });
+      const data = await res.json();
+      if (data.error) {
+        errBox.textContent = data.error;
+        errBox.hidden = false;
+      } else {
+        okBox.innerHTML = `Pushed successfully! <a href="${data.url}" target="_blank" rel="noopener">Open repo ↗</a>`;
+        okBox.hidden = false;
+      }
+    } catch (e) {
+      errBox.textContent = 'Network error — check the console.';
+      errBox.hidden = false;
+    } finally {
+      doBtn.disabled = false;
+      doBtn.textContent = 'Push';
+    }
   });
 </script>
 {% endif %}

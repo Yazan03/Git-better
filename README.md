@@ -384,7 +384,7 @@ Members see only their own reports. Admins see everything.
 
 ---
 
-## False Positive Mitigation
+## False Positive Mitigation.
 
 The rules are designed to minimize noise:
 

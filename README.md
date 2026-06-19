@@ -159,14 +159,9 @@ Source Code
 ### Run locally
 
 ```bash
-# Scan a directory
-python3 scripts/vuln_scanner.py --path ./src --output report.json
+#Scan a file or a directory
 
-# Scan a single file
-python3 scripts/vuln_scanner.py --path app.py --output report.json
-
-# Exclude directories
-python3 scripts/vuln_scanner.py --path . --exclude venv node_modules dist
+./initiate_test <file/directory path>
 ```
 
 The scanner outputs a JSON report and exits with code `1` if any HIGH findings are detected.

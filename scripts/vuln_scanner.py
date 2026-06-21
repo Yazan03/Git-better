@@ -1940,10 +1940,18 @@ RULES = {
         ("SEC007", "HIGH",   r'dangerouslySetInnerHTML\s*=\s*\{\s*\{.*\b(props\.|state\.|this\.state|req\.|request\.)',
                              "React dangerouslySetInnerHTML with dynamic/user data — XSS risk"),
         # ── expr-eval CVE-2025-12735: RCE via evaluate() function injection ──
+        # Application-side: detect usage of the vulnerable library
         ("SEC136", "CRITICAL", r'require\s*\(\s*["\']expr-eval["\']\s*\)|from\s+["\']expr-eval["\']',
                              "expr-eval imported — CVE-2025-12735: Parser.evaluate() allows RCE via function injection in the context object; maintainer unresponsive, main branch unpatched"),
         ("SEC136", "CRITICAL", r'\.evaluate\s*\(\s*(?:[^,)]+,\s*)?\b(req\.(query|params|body|headers)|request\.(query|params|body|headers)|userInput|userData|ctx|context|input|data)\b',
                              "expr-eval .evaluate() called with user-controlled context — CVE-2025-12735: attacker can inject arbitrary functions to achieve RCE"),
+        # Library-side: detect the vulnerable implementation pattern inside expression evaluator code
+        # Fires on evaluate.js in expr-eval itself: IVAR pushes any value from user context (incl. functions)
+        ("SEC136", "CRITICAL", r'\bvalues\s*\[\s*\w+\.value\s*\]',
+                             "Expression evaluator reads variable from user-supplied values object without filtering out function types — CVE-2025-12735: any function in the context object reaches the execution stack and can be invoked"),
+        # Fires on the IFUNCALL handler: checks callable via .apply&&.call instead of verifying trusted origin
+        ("SEC136", "CRITICAL", r'if\s*\(\s*\w+\.apply\s*&&\s*\w+\.call\s*\)',
+                             "Expression evaluator invokes a value as a function by checking .apply/.call alone — CVE-2025-12735 pattern: does not verify the function came from a trusted allowlist vs. user-controlled context, enabling RCE via context injection"),
     ],
 
     "php": [

@@ -199,6 +199,7 @@ RULE_META: dict[str, tuple[str, str]] = {
     "SEC133":  ("CWE-918", "A10:2021"),   # Python urllib SSRF with user input
     "SEC134":  ("CWE-94",  "A03:2021"),   # PHP backtick operator
     "SEC135":  ("CWE-327", "A02:2021"),   # PHP crypt/rot13 weak crypto
+    "SEC136":  ("CWE-94",  "A03:2021"),   # expr-eval CVE-2025-12735: RCE via evaluate() context injection
     # SEC001E: entropy-based secret detection
     "SEC001E": ("CWE-798", "A07:2021"),   # High-entropy string literal — possible secret
     # SEC2xx: Dockerfile security rules
@@ -219,6 +220,13 @@ RULE_META: dict[str, tuple[str, str]] = {
     "SEC306":  ("CWE-532", "A09:2021"),   # Secret echoed in workflow log
     "SEC307":  ("CWE-732", "A05:2021"),   # write-all permissions
     "SEC308":  ("CWE-78",  "A03:2021"),   # env variable injection in run step
+    # SEC*TS: Tree-sitter AST taint findings — PHP, Java, Go (HIGH confidence)
+    "SEC004TS": ("CWE-89",  "A03:2021"),   # SQL injection (tree-sitter)
+    "SEC002TS": ("CWE-78",  "A03:2021"),   # Command injection (tree-sitter)
+    "SEC006TS": ("CWE-79",  "A03:2021"),   # XSS (tree-sitter)
+    "SEC035TS": ("CWE-22",  "A01:2021"),   # Path traversal / LFI (tree-sitter)
+    "SEC056TS": ("CWE-601", "A01:2021"),   # Open redirect (tree-sitter)
+    "SEC066TS": ("CWE-918", "A10:2021"),   # SSRF (tree-sitter)
 }
 
 EXTENSION_MAP = {
@@ -1729,11 +1737,19 @@ RULES = {
                              "SSRF risk: urllib.urlopen with user-controlled URL — validate and whitelist destinations"),
         ("SEC133", "MEDIUM", r'\burllib(?:\.request)?\.urlopen\s*\(\s*[A-Za-z_]\w*',
                              "SSRF risk: urllib.urlopen with variable URL — ensure destination is validated"),
-        # XXE
+        # XXE - Enhanced patterns to catch actual parsing calls
         ("SEC067", "MEDIUM", r'\bimport\s+xml(?:\s|$)|\bfrom\s+xml\b',
                              "XML import detected — use defusedxml instead to prevent XXE attacks"),
         ("SEC083", "HIGH",   r'\blxml\.etree\b|\bxml\.sax\b|\bxml\.dom\b|\bxml\.etree\b|\bXMLParser\s*\(',
                              "XML parser usage — ensure external entities are disabled or use defusedxml"),
+        ("SEC083", "HIGH",   r'\bxml\.etree\.ElementTree\.(parse|fromstring|iterparse|XMLParser)\s*\(',
+                             "xml.etree parsing without defusedxml — XXE vulnerability, use defusedxml.ElementTree instead"),
+        ("SEC083", "HIGH",   r'\blxml\.etree\.(parse|fromstring|XMLParser|iterparse|HTML|XML)\s*\([^)]*(?!resolve_entities\s*=\s*False)',
+                             "lxml parsing without resolve_entities=False — XXE vulnerability"),
+        ("SEC083", "HIGH",   r'\bxml\.sax\.(parse|parseString|make_parser)\s*\(',
+                             "xml.sax parsing — XXE vulnerability, use defusedxml.sax instead"),
+        ("SEC083", "HIGH",   r'\bminidom\.(parse|parseString)\s*\(',
+                             "minidom parsing — XXE vulnerability, use defusedxml.minidom instead"),
         ("SEC115", "MEDIUM", r'\bimport\s+xmlrpc\b|\bimport\s+xmlrpclib\b|\bimport\s+SimpleXMLRPCServer\b',
                              "xmlrpc usage — use defusedxml.xmlrpc to prevent XML entity attacks"),
         # YAML injection
@@ -1923,6 +1939,11 @@ RULES = {
         # dangerouslySetInnerHTML already in SEC007 but add explicit with user input
         ("SEC007", "HIGH",   r'dangerouslySetInnerHTML\s*=\s*\{\s*\{.*\b(props\.|state\.|this\.state|req\.|request\.)',
                              "React dangerouslySetInnerHTML with dynamic/user data — XSS risk"),
+        # ── expr-eval CVE-2025-12735: RCE via evaluate() function injection ──
+        ("SEC136", "CRITICAL", r'require\s*\(\s*["\']expr-eval["\']\s*\)|from\s+["\']expr-eval["\']',
+                             "expr-eval imported — CVE-2025-12735: Parser.evaluate() allows RCE via function injection in the context object; maintainer unresponsive, main branch unpatched"),
+        ("SEC136", "CRITICAL", r'\.evaluate\s*\(\s*(?:[^,)]+,\s*)?\b(req\.(query|params|body|headers)|request\.(query|params|body|headers)|userInput|userData|ctx|context|input|data)\b',
+                             "expr-eval .evaluate() called with user-controlled context — CVE-2025-12735: attacker can inject arbitrary functions to achieve RCE"),
     ],
 
     "php": [
@@ -1934,6 +1955,13 @@ RULES = {
         ("SEC012", "HIGH",   r'\bshell_exec\s*\((?!.*escapeshellarg)(?!.*escapeshellcmd)|\bsystem\s*\((?!.*escapeshellarg)(?!.*escapeshellcmd)|\bpassthru\s*\((?!.*escapeshellarg)',
                              "Shell execution function — injection risk (use escapeshellarg to sanitise)"),
         ("SEC004", "HIGH",   r'mysql_query\s*\(.*\$',        "Possible SQL injection"),
+        # Enhanced PHP SQL injection patterns - catch string concatenation
+        ("SEC004", "HIGH",   r'\b(mysqli_query|mysql_query|pg_query|mssql_query)\s*\([^)]*\$[a-zA-Z_][\w\[\]]*\s*[)\.]',
+                             "SQL query function with variable — possible SQL injection"),
+        ("SEC004", "HIGH",   r'\$\w+\s*=\s*["\'].*(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE).*["\'].*\.\s*\$_(GET|POST|REQUEST|COOKIE)',
+                             "SQL query string concatenated with user input — SQL injection risk"),
+        ("SEC004", "HIGH",   r'\$\w+\s*=\s*["\'].*(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE).*["\'].*\.\s*\$[a-zA-Z_]',
+                             "SQL query built via string concatenation — verify input sanitization"),
         ("SEC057", "MEDIUM", r'GraphQL\\GraphQL::executeQuery\s*\(.*\b\$_(GET|POST|REQUEST|COOKIE)',
                              "GraphQL execution with user input as query string - injection risk"),
         ("SEC013", "HIGH",   r'\bmd5\s*\(|\bsha1\s*\(',      "Weak hashing (MD5/SHA1)"),
@@ -2024,9 +2052,9 @@ RULES = {
         # SSL verification disabled
         ("SEC097", "HIGH",   r'\bcurl_setopt\s*\(.*CURLOPT_SSL_VERIFYPEER\s*,\s*(0|false|null)\b',
                              "PHP cURL SSL verification disabled (CURLOPT_SSL_VERIFYPEER=false) — vulnerable to MITM"),
-        # Type juggling
-        ("SEC093", "HIGH",   r'\bif\s*\(.*==\s*(0|false|null|true|["\'][^"\']*["\'])|===\s*\d+\s*&&|\bswitch\s*\(\s*\$',
-                             "Loose PHP comparison (==) — type juggling can bypass authentication checks, use ==="),
+        # Type juggling - NARROWED to reduce false positives (only security-critical contexts)
+        ("SEC093", "HIGH",   r'\b(password|passwd|pwd|hash|token|secret|auth|admin|login|session|role|permission|privilege)\s*==\s*(0|false|null|true|["\'][^"\']*["\'])|if\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)\[[^\]]+\]\s*==\s*(0|false|null|true)|==\s*(0|false|null)\s*&&.*\b(auth|login|admin|session)',
+                             "PHP loose comparison (==) in security-sensitive context — type juggling can bypass authentication, use ==="),
         # extract/parse_str injection
         ("SEC094", "HIGH",   r'\bextract\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)|\bparse_str\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)',
                              "extract() or parse_str() with user input — variable injection risk"),
@@ -2558,7 +2586,7 @@ _TAINT_SINKS: dict[str, list[tuple[str, str, str, str]]] = {
     ],
     "php": [
         ("SEC004T", "HIGH",
-         r'\b(?:mysql_query|mysqli_query|->query|->prepare|PDO::query)\s*\(',
+         r'\b(?:mysql_query|mysqli_query|mysqli_real_query|mysqli_multi_query|pg_query|mssql_query|odbc_exec|sqlsrv_query|->query|->exec|->execute|->prepare|PDO::query|PDO::exec)\s*\(',
          "SQL sink — user-controlled variable flows into query"),
         ("SEC006T", "HIGH",
          r'\becho\b|\bprint\b',
@@ -2708,6 +2736,32 @@ def scan_taint(path: Path, language: str, taint_window: int = 25) -> list[Findin
 
     if not tainted:
         return []
+
+    # Pass 1.5: Taint propagation — track when tainted vars are assigned to other vars
+    # This catches patterns like: $html .= $tainted_var; or output = output + tainted_var
+    max_propagation_iterations = 3
+    for _ in range(max_propagation_iterations):
+        new_tainted: dict[str, list[int]] = {}
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Check if this line assigns using a tainted variable
+            lhs = _lhs_name(line, language)
+            if lhs and lhs not in tainted:
+                # Check if any tainted variable appears on the right-hand side
+                for tainted_var in list(tainted.keys()):
+                    # Match variable usage: $var, var, var[...], etc.
+                    if re.search(r'\b' + re.escape(tainted_var) + r'\b', line):
+                        # Also check for concatenation/append operations
+                        if any(op in line for op in ['.=', '+=', '+', '.', 'concat', '||', '&']):
+                            new_tainted.setdefault(lhs, []).append(i)
+                            break
+        # Merge new tainted variables
+        if not new_tainted:
+            break  # No new propagation, exit early
+        for var, lines_list in new_tainted.items():
+            tainted.setdefault(var, []).extend(lines_list)
 
     # Pass 2: match sinks and check for tainted-variable usage
     findings: list[Finding] = []
@@ -3010,14 +3064,16 @@ def _is_py_source(node: ast.expr) -> bool:
         name = _py_call_name(node)
         # Everything on flask/Django request objects is tainted
         first = name.split(".")[0] if "." in name else ""
-        if name.startswith("request.") or first in _REQUEST_PARAM_NAMES:
+        if (name.startswith("request.") or name.startswith("flask.request.")
+                or first in _REQUEST_PARAM_NAMES):
             return True
         if name in _PY_SOURCE_CALLS or any(name.endswith("." + s) for s in _PY_SOURCE_CALLS):
             return True
     if isinstance(node, ast.Attribute):
         name = _dotted_name(node)
         first = name.split(".")[0] if "." in name else ""
-        if name.startswith("request.") or first in _REQUEST_PARAM_NAMES:
+        if (name.startswith("request.") or name.startswith("flask.request.")
+                or first in _REQUEST_PARAM_NAMES):
             return True
     if isinstance(node, ast.Subscript):
         return _is_py_source(node.value)
@@ -3226,7 +3282,76 @@ def _propagate_taint(
 
         if len(tainted) == prev:
             break   # fixed point reached
+
+    # Remove variables that are shielded by a realpath + startswith guard exit
+    _remove_guard_sanitized(func, tainted)
+
     return tainted
+
+
+def _remove_guard_sanitized(
+    func: "ast.FunctionDef | ast.AsyncFunctionDef",
+    tainted: set[str],
+) -> None:
+    """
+    Remove variables from `tainted` that are protected by a realpath/resolve
+    + startswith guard exit pattern, e.g.:
+
+        filepath = os.realpath(os.path.join(BASE_DIR, filename))
+        if not filepath.startswith(BASE_DIR):
+            return abort(403)      # early exit
+
+    After the guard, `filepath` is safe to use in open() etc.
+    Modifies `tainted` in-place.
+    """
+    # Collect variables assigned via os.realpath() or os.path.realpath()
+    realpath_vars: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign):
+            continue
+        rhs = node.value
+        if not isinstance(rhs, ast.Call):
+            continue
+        call_name = _py_call_name(rhs)
+        if call_name in ("os.realpath", "os.path.realpath", "realpath"):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    realpath_vars.add(t.id)
+
+    if not realpath_vars:
+        return
+
+    # Check if any realpath var is the subject of a .startswith() guard with early exit
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        # Accept `not var.startswith(...)` or `UnaryOp(Not, var.startswith(...))`
+        inner = test
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            inner = test.operand
+        if not isinstance(inner, ast.Call):
+            continue
+        if not isinstance(inner.func, ast.Attribute):
+            continue
+        if inner.func.attr != "startswith":
+            continue
+        subj = inner.func.value
+        if not isinstance(subj, ast.Name):
+            continue
+        var_name = subj.id
+        if var_name not in realpath_vars:
+            continue
+        # The if-body must be an early exit (return/raise/continue)
+        body = node.body
+        has_exit = any(
+            isinstance(stmt, (ast.Return, ast.Raise, ast.Continue, ast.Break))
+            or (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                and _py_call_name(stmt.value) in ("abort", "flask.abort", "sys.exit", "exit"))
+            for stmt in body
+        )
+        if has_exit:
+            tainted.discard(var_name)
 
 
 _REQUEST_PARAM_NAMES: frozenset[str] = frozenset({
@@ -3327,6 +3452,119 @@ def _enclosing_class_name(
     return None
 
 
+_SQL_KEYWORDS = re.compile(
+    r'\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|DROP|CREATE|ALTER|UNION)\b',
+    re.IGNORECASE,
+)
+
+def _scan_sql_param_concat(
+    path: Path,
+    source: str,
+    lines: list[str],
+    tree: ast.AST,
+) -> list[Finding]:
+    """
+    Detect: function parameter directly concatenated into a SQL-looking string
+    → passed to .execute() with a single argument (not parameterized).
+
+    Catches multi-line patterns like:
+        def find_user(username):
+            query = "SELECT ... '" + username + "'"
+            cursor.execute(query)        # ← flagged
+
+    Does NOT flag parameterized calls like cursor.execute(query, (username,))
+    because there `query` itself is a plain string literal (not tainted).
+    """
+    findings: list[Finding] = []
+    reported: set[tuple[int, str]] = set()
+
+    def _binop_names(node: ast.expr) -> set[str]:
+        """Collect all Name.id values inside a BinOp tree."""
+        names: set[str] = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name):
+                names.add(n.id)
+        return names
+
+    def _binop_has_sql_literal(node: ast.expr) -> bool:
+        """True if any Constant string in the BinOp contains a SQL keyword."""
+        for n in ast.walk(node):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                if _SQL_KEYWORDS.search(n.value):
+                    return True
+        return False
+
+    all_funcs = [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+    for func in all_funcs:
+        params = {a.arg for a in func.args.args if a.arg not in ("self", "cls")}
+        if not params:
+            continue
+
+        # Map assigned variable → set of Names in its RHS BinOp
+        sql_concat_vars: dict[str, set[str]] = {}
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign):
+                continue
+            rhs = node.value
+            if not isinstance(rhs, ast.BinOp):
+                continue
+            if not _binop_has_sql_literal(rhs):
+                continue
+            names = _binop_names(rhs)
+            if not (names & params):
+                continue
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    sql_concat_vars[t.id] = names & params
+
+        if not sql_concat_vars:
+            continue
+
+        # Find .execute() calls with a single arg that is one of those vars
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in ("execute", "executemany"):
+                continue
+            # Only single-argument (non-parameterized) calls
+            if len(node.args) != 1 or node.keywords:
+                continue
+            arg = node.args[0]
+            if not isinstance(arg, ast.Name):
+                continue
+            if arg.id not in sql_concat_vars:
+                continue
+            key = (node.lineno, "SEC004T")
+            if key in reported:
+                continue
+            reported.add(key)
+            snippet = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+            cwe, owasp = RULE_META.get("SEC004T", ("CWE-89", "A03:2021"))
+            findings.append(Finding(
+                file=str(path),
+                line=node.lineno,
+                severity="HIGH",
+                rule_id="SEC004T",
+                language="python",
+                message=(
+                    f"SQL injection — parameter(s) {sql_concat_vars[arg.id]} "
+                    "concatenated into SQL string passed to execute()"
+                ),
+                code_snippet=snippet[:120],
+                confidence="HIGH",
+                cwe=cwe,
+                owasp=owasp,
+            ))
+
+    return findings
+
+
 def scan_python_ast_taint(
     path: Path,
     cross_file_funcs: frozenset[str] = frozenset(),
@@ -3401,6 +3639,10 @@ def scan_python_ast_taint(
         except Exception:
             pass
 
+        # Re-apply guard sanitization after CFG merge (CFG union may re-add
+        # variables that realpath + startswith guards make safe)
+        _remove_guard_sanitized(func, tainted)
+
         if not tainted:
             continue
 
@@ -3435,6 +3677,12 @@ def scan_python_ast_taint(
                     cwe=cwe,
                     owasp=owasp,
                 ))
+
+    # Additional pass: parameter → SQL concat → execute() (no web source required)
+    try:
+        findings.extend(_scan_sql_param_concat(path, source, lines, tree))
+    except Exception:
+        pass
 
     return findings
 
@@ -3830,7 +4078,62 @@ def _js_propagate_in_scope(body_nodes: list[dict], tainted: set[str]) -> set[str
         if len(tainted) == prev:
             break
 
+    # Remove variables guarded by path.resolve() + .startsWith() + early exit
+    _js_remove_guard_sanitized(body_nodes, tainted)
+
     return tainted
+
+
+def _js_remove_guard_sanitized(stmts: list[dict], tainted: set[str]) -> None:
+    """
+    Remove variables from `tainted` that are protected by:
+        const filepath = path.resolve(...);
+        if (!filepath.startsWith(BASE_DIR)) { return ...; }
+
+    Modifies tainted in-place.
+    """
+    # Collect vars assigned via path.resolve() or path.normalize()
+    resolve_vars: set[str] = set()
+    for stmt in stmts:
+        if stmt.get("type") != "VariableDeclaration":
+            continue
+        for decl in stmt.get("declarations", []):
+            init = decl.get("init")
+            if not init or init.get("type") != "CallExpression":
+                continue
+            chain = _js_member_chain(init.get("callee", {}))
+            last = chain.rsplit(".", 1)[-1] if "." in chain else chain
+            if last in ("resolve", "normalize"):
+                for name in _js_pattern_names(decl.get("id", {})):
+                    resolve_vars.add(name)
+
+    if not resolve_vars:
+        return
+
+    for stmt in stmts:
+        if stmt.get("type") != "IfStatement":
+            continue
+        test = stmt.get("test", {})
+        # Accept `!var.startsWith(...)` or `var.startsWith(...) === false`
+        inner = test
+        if test.get("type") == "UnaryExpression" and test.get("operator") == "!":
+            inner = test.get("argument", {})
+        if inner.get("type") != "CallExpression":
+            continue
+        callee = inner.get("callee", {})
+        if (callee.get("type") != "MemberExpression"
+                or callee.get("property", {}).get("name") != "startsWith"):
+            continue
+        obj = callee.get("object", {})
+        if obj.get("type") != "Identifier" or obj.get("name") not in resolve_vars:
+            continue
+        # The if-body must be an early exit (return/throw)
+        cons = stmt.get("consequent", {})
+        body_stmts = cons.get("body", []) if cons.get("type") == "BlockStatement" else [cons]
+        has_exit = any(s.get("type") in ("ReturnStatement", "ThrowStatement")
+                       for s in body_stmts)
+        if has_exit:
+            tainted.discard(obj.get("name"))
 
 
 # JS function summary for inter-procedural taint
@@ -3986,6 +4289,17 @@ def _js_check_sinks(
                     for rule_id, severity, sink_names, message in _JS_AST_SINKS:
                         if call_name not in sink_names and last not in sink_names:
                             continue
+                        # SQL sinks: parameterized queries pass tainted values as
+                        # the second arg (e.g. db.query(sql, [params], cb)).
+                        # Only flag when the SQL string itself (first arg) is tainted.
+                        if rule_id == "SEC004T":
+                            if not (args and _js_uses_tainted(args[0], tainted)):
+                                continue
+                        # execFile/execFileSync are safe when the binary name is static
+                        # and only the arguments array contains tainted values.
+                        if rule_id == "SEC003T" and last in ("execFile", "execFileSync"):
+                            if not (args and _js_uses_tainted(args[0], tainted)):
+                                continue
                         loc = n.get("loc", {})
                         lineno = loc.get("start", {}).get("line", 0)
                         key = (lineno, rule_id)
@@ -4101,7 +4415,7 @@ def scan_js_ast(path: Path) -> list[Finding]:
     # Seed names that indicate the parameter IS the request object
     _REQ_PARAM_NAMES = frozenset({
         "req", "request", "ctx", "context", "e", "event",
-        "msg", "message", "data",
+        "msg", "message",
     })
 
     def _scan_scope(params: list[str], body_nodes: list[dict],
@@ -4295,6 +4609,43 @@ def scan_structural_python(path: Path) -> list[Finding]:
     findings: list[Finding] = []
     reported: set[tuple[int, str]] = set()
 
+    # Pre-compute realpath-guarded variables per function for FP suppression
+    _guard_sanitized_by_func: dict[int, set[str]] = {}
+    for func_node in ast.walk(tree):
+        if not isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        gs: set[str] = set()
+        _remove_guard_sanitized(func_node, gs)
+        # gs will be empty since we seeded empty — instead collect realpath vars directly
+        realpath_vars: set[str] = set()
+        for n in ast.walk(func_node):
+            if not isinstance(n, ast.Assign):
+                continue
+            rhs = n.value
+            if not isinstance(rhs, ast.Call):
+                continue
+            cn = _py_call_name(rhs)
+            if cn in ("os.realpath", "os.path.realpath", "realpath"):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        realpath_vars.add(t.id)
+        if realpath_vars:
+            dummy: set[str] = set(realpath_vars)
+            _remove_guard_sanitized(func_node, dummy)
+            guarded = realpath_vars - dummy
+            _guard_sanitized_by_func[id(func_node)] = guarded
+
+    # Build a mapping from AST node id to enclosing function id
+    _node_to_func: dict[int, int] = {}
+    for func_node in ast.walk(tree):
+        if isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for child in ast.walk(func_node):
+                if id(child) not in _node_to_func:
+                    _node_to_func[id(child)] = id(func_node)
+
+    _PATH_RULE_IDS = frozenset({"SEC_FI001", "SEC_FI002", "SEC_FI003", "SEC_FI004",
+                                 "SEC035T", "SEC035S"})
+
     def _emit(node: ast.AST, rule: StructuralRule, bindings: dict) -> None:
         # pattern-not: skip if any negative pattern matches this node
         if any(match_py_pattern(neg, node) is not None for neg in rule.pattern_not):
@@ -4307,6 +4658,14 @@ def scan_structural_python(path: Path) -> list[Finding]:
             val_src = ast.unparse(bound) if hasattr(ast, "unparse") else ""
             if not compiled_re.search(val_src):
                 return
+        # Suppress path-operation findings when the path arg is realpath-guarded
+        if rule.id in _PATH_RULE_IDS:
+            path_arg = bindings.get("PATH") or bindings.get("SRC") or bindings.get("DST")
+            if path_arg is not None and isinstance(path_arg, ast.Name):
+                enclosing_id = _node_to_func.get(id(node))
+                guarded = _guard_sanitized_by_func.get(enclosing_id, set())
+                if path_arg.id in guarded:
+                    return
         lineno = getattr(node, "lineno", 0)
         key = (lineno, rule.id)
         if key in reported:
@@ -4388,6 +4747,32 @@ def scan_structural_js(path: Path) -> list[Finding]:
     findings: list[Finding] = []
     reported: set[tuple[int, str]] = set()
 
+    # Pre-collect path.resolve-guarded variables for FP suppression on path rules
+    _JS_PATH_RULE_IDS = frozenset({"SEC_PT001", "SEC_PT002", "SEC_PT003",
+                                    "SEC_PT004", "SEC_PT005", "SEC035T"})
+    _js_guarded: set[str] = set()
+    for func in _js_collect_functions(root_dict):
+        body_nodes = _js_get_body_nodes(func)
+        if not body_nodes:
+            continue
+        # Collect resolve vars in this function's body
+        resolve_vars: set[str] = set()
+        for stmt in body_nodes:
+            if stmt.get("type") != "VariableDeclaration":
+                continue
+            for decl in stmt.get("declarations", []):
+                init = decl.get("init")
+                if not init or init.get("type") != "CallExpression":
+                    continue
+                chain = _js_member_chain(init.get("callee", {}))
+                if chain.rsplit(".", 1)[-1] in ("resolve", "normalize"):
+                    for name in _js_pattern_names(decl.get("id", {})):
+                        resolve_vars.add(name)
+        if resolve_vars:
+            guarded = set(resolve_vars)
+            _js_remove_guard_sanitized(body_nodes, guarded)
+            _js_guarded.update(resolve_vars - guarded)
+
     for rule in rules:
         patterns_to_try = rule.pattern_either if rule.pattern_either else ([rule.pattern] if rule.pattern else [])
         for pat in patterns_to_try:
@@ -4396,6 +4781,22 @@ def scan_structural_js(path: Path) -> list[Finding]:
             for node, bindings in find_js_pattern(pat, root_dict):
                 if any(match_js_pattern(neg, node) is not None for neg in rule.pattern_not):
                     continue
+                # Suppress path rules when the path arg is resolve-guarded
+                if rule.id in _JS_PATH_RULE_IDS and _js_guarded:
+                    path_arg = bindings.get("PATH") or bindings.get("INPUT") or bindings.get("BASE")
+                    if path_arg is not None:
+                        arg_name = (path_arg.get("name") if path_arg.get("type") == "Identifier"
+                                    else _js_member_chain(path_arg))
+                        if arg_name in _js_guarded:
+                            continue
+                    # SEC_PT005: path.join() wrapped in path.resolve() at same line
+                    if rule.id == "SEC_PT005":
+                        loc = node.get("loc", {})
+                        lineno = loc.get("start", {}).get("line", 0)
+                        if 0 < lineno <= len(lines):
+                            src_line = lines[lineno - 1]
+                            if "path.resolve" in src_line or "path.normalize" in src_line:
+                                continue
                 loc = node.get("loc", {})
                 lineno = loc.get("start", {}).get("line", 0)
                 key = (lineno, rule.id)
@@ -4442,6 +4843,946 @@ def _detect_language(path: Path) -> str | None:
     return None
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tree-sitter taint engine — PHP, Java, Go
+#
+# Replaces line-by-line regex for these three languages with proper AST-based
+# taint analysis, giving:
+#   • No false positives from matches inside comments or string literals
+#   • True data-flow: source → assign chain → sink (multi-step)
+#   • HIGH-confidence findings (rule IDs end in "TS")
+#
+# Falls back silently if tree-sitter packages are not installed.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_TS_PARSERS_CACHE: dict = {}
+
+
+def _get_ts_parser(lang: str):
+    """Lazy-load and cache a (Parser, Language) pair for php/java/go. Returns None on failure."""
+    if lang in _TS_PARSERS_CACHE:
+        return _TS_PARSERS_CACHE[lang]
+    try:
+        from tree_sitter import Language as _TSL, Parser as _TSP
+        if lang == "php":
+            import tree_sitter_php as _m
+            lo = _TSL(_m.language_php())
+        elif lang == "java":
+            import tree_sitter_java as _m
+            lo = _TSL(_m.language())
+        elif lang == "go":
+            import tree_sitter_go as _m
+            lo = _TSL(_m.language())
+        else:
+            _TS_PARSERS_CACHE[lang] = None
+            return None
+        p = _TSP(lo)
+        _TS_PARSERS_CACHE[lang] = (p, lo)
+        return _TS_PARSERS_CACHE[lang]
+    except Exception:
+        _TS_PARSERS_CACHE[lang] = None
+        return None
+
+
+def _ts_text(node, src: bytes) -> str:
+    return src[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+
+def _ts_walk(node):
+    yield node
+    for child in node.children:
+        yield from _ts_walk(child)
+
+
+def _ts_finding(
+    path: Path, node, rule_id: str, severity: str,
+    language: str, message: str, lines: list[str],
+) -> "Finding":
+    lineno = node.start_point[0] + 1
+    snippet = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ""
+    cwe, owasp = RULE_META.get(rule_id, ("", ""))
+    return Finding(
+        file=str(path), line=lineno, severity=severity,
+        rule_id=rule_id, language=language,
+        message=message, code_snippet=snippet[:120],
+        confidence="HIGH", cwe=cwe, owasp=owasp,
+    )
+
+
+# ── PHP taint engine ──────────────────────────────────────────────────────────
+
+_PHP_TAINT_SOURCES: frozenset[str] = frozenset({
+    "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES", "$_SERVER", "$_ENV",
+})
+
+_PHP_SANITIZERS: frozenset[str] = frozenset({
+    "htmlspecialchars", "htmlentities", "strip_tags", "esc_html", "esc_attr",
+    "intval", "floatval", "absint", "intdiv",
+    "mysqli_real_escape_string", "mysql_real_escape_string", "addslashes",
+    "escapeshellarg", "escapeshellcmd",
+    "base64_encode", "urlencode", "rawurlencode", "json_encode",
+    "preg_quote", "number_format", "filter_var", "filter_input",
+})
+
+_PHP_SQL_SINKS: frozenset[str] = frozenset({
+    "mysql_query", "mysql_db_query",
+    "mysqli_query", "mysqli_multi_query", "mysqli_real_query",
+    "pg_query", "pg_execute", "pg_query_params",
+    "sqlite_query", "sqlite_exec",
+    "query", "exec", "execute", "prepare",
+})
+
+_PHP_CMD_SINKS: frozenset[str] = frozenset({
+    "exec", "system", "shell_exec", "passthru", "popen", "proc_open", "pcntl_exec",
+})
+
+_PHP_FILE_SINKS: frozenset[str] = frozenset({
+    "file_get_contents", "file_put_contents", "fopen",
+    "readfile", "file", "unlink", "rename", "copy", "move_uploaded_file",
+})
+
+_PHP_EVAL_SINKS: frozenset[str] = frozenset({"eval", "assert"})
+_PHP_HEADER_SINKS: frozenset[str] = frozenset({"header"})
+
+
+def _php_is_tainted(node, src: bytes, tainted: set) -> bool:
+    """Return True if this PHP expression subtree contains user-controlled data."""
+    if node is None:
+        return False
+    ntype = node.type
+
+    if ntype == "subscript_expression":
+        children = node.named_children
+        if children and _ts_text(children[0], src) in _PHP_TAINT_SOURCES:
+            return True
+
+    if ntype == "variable_name":
+        t = _ts_text(node, src)
+        return t in _PHP_TAINT_SOURCES or t in tainted
+
+    if ntype == "encapsed_string":
+        return any(_php_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype in ("binary_expression",):
+        return any(_php_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype == "function_call_expression":
+        nc = node.named_children
+        if nc and _ts_text(nc[0], src).lower().lstrip("\\") in _PHP_SANITIZERS:
+            return False
+        return any(_php_is_tainted(c, src, tainted) for c in nc)
+
+    if ntype == "member_call_expression":
+        return any(_php_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype == "cast_expression":
+        for c in node.children:
+            if c.type == "cast_type" and _ts_text(c, src).lower() in (
+                "int", "integer", "float", "double", "bool", "boolean"
+            ):
+                return False
+        return any(_php_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype in ("arguments", "argument", "array_creation_expression"):
+        return any(_php_is_tainted(c, src, tainted) for c in node.named_children)
+
+    return False
+
+
+def _php_propagate_scope(stmts: list, src: bytes, tainted: set) -> None:
+    while True:
+        prev = len(tainted)
+        _php_propagate_once(stmts, src, tainted)
+        if len(tainted) == prev:
+            break
+
+
+def _php_propagate_once(stmts: list, src: bytes, tainted: set) -> None:
+    for node in stmts:
+        ntype = node.type
+
+        if ntype == "expression_statement":
+            _php_propagate_once(list(node.named_children), src, tainted)
+
+        elif ntype == "assignment_expression":
+            nc = node.named_children
+            if len(nc) >= 2 and _php_is_tainted(nc[-1], src, tainted):
+                if nc[0].type == "variable_name":
+                    tainted.add(_ts_text(nc[0], src))
+
+        elif ntype == "augmented_assignment_expression":
+            nc = node.named_children
+            if nc:
+                lhs_text = _ts_text(nc[0], src)
+                if lhs_text in tainted or (len(nc) > 1 and _php_is_tainted(nc[-1], src, tainted)):
+                    tainted.add(lhs_text)
+
+        elif ntype == "foreach_statement":
+            nc = node.named_children
+            if nc and _php_is_tainted(nc[0], src, tainted):
+                for c in nc[1:]:
+                    if c.type == "variable_name":
+                        tainted.add(_ts_text(c, src))
+            for c in nc:
+                if c.type == "compound_statement":
+                    _php_propagate_once(list(c.named_children), src, tainted)
+
+        elif ntype in ("if_statement", "while_statement", "for_statement",
+                       "do_statement", "try_statement"):
+            for child in node.named_children:
+                if child.type in ("compound_statement", "else_clause",
+                                  "elseif_clause", "finally_clause", "catch_clause"):
+                    _php_propagate_once(list(child.named_children), src, tainted)
+
+        elif ntype == "compound_statement":
+            _php_propagate_once(list(node.named_children), src, tainted)
+
+
+def _php_scan_sinks(
+    stmts: list, src: bytes, tainted: set,
+    path: "Path", lines: list, reported: set,
+) -> "list[Finding]":
+    findings: list = []
+
+    def _report(rule_id, severity, message, node):
+        lineno = node.start_point[0] + 1
+        key = (lineno, rule_id)
+        if key in reported:
+            return
+        reported.add(key)
+        findings.append(_ts_finding(path, node, rule_id, severity, "php", message, lines))
+
+    def _check_call(call_node):
+        if call_node.type == "function_call_expression":
+            nc = call_node.named_children
+            fname = _ts_text(nc[0], src).lower().lstrip("\\") if nc else ""
+            arg_nodes = [c for c in (nc[1].named_children if len(nc) > 1 and nc[1].type == "arguments" else [])
+                         if c.is_named]
+        elif call_node.type == "member_call_expression":
+            nc = call_node.named_children
+            fname = _ts_text(nc[1], src).lower() if len(nc) > 1 else ""
+            arg_nodes = [c for c in (nc[2].named_children if len(nc) > 2 and nc[2].type == "arguments" else [])
+                         if c.is_named]
+        else:
+            return
+
+        if fname in _PHP_SQL_SINKS:
+            if any(_php_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC004TS", "HIGH",
+                        "SQL injection — user-controlled value flows into database query", call_node)
+
+        if fname in _PHP_CMD_SINKS:
+            if any(_php_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC002TS", "HIGH",
+                        "Command injection — user-controlled value flows into shell execution", call_node)
+
+        if fname in _PHP_FILE_SINKS:
+            if arg_nodes and _php_is_tainted(arg_nodes[0], src, tainted):
+                _report("SEC035TS", "HIGH",
+                        "Path traversal / LFI — user-controlled value used as file path", call_node)
+
+        if fname in _PHP_EVAL_SINKS:
+            if any(_php_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC002TS", "HIGH",
+                        "Code injection — user-controlled value passed to eval()", call_node)
+
+        if fname in _PHP_HEADER_SINKS:
+            if arg_nodes and _php_is_tainted(arg_nodes[0], src, tainted):
+                _report("SEC056TS", "MEDIUM",
+                        "Header injection / open redirect — user-controlled value in header()", call_node)
+
+        if fname in ("printf", "vprintf", "fprintf", "sprintf"):
+            if any(_php_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC006TS", "HIGH",
+                        "XSS — user-controlled value in printf-family output", call_node)
+
+    def _check_expr(node):
+        if node.type in ("function_call_expression", "member_call_expression"):
+            _check_call(node)
+        for child in node.named_children:
+            _check_expr(child)
+
+    def _scan(inner_stmts):
+        for node in inner_stmts:
+            ntype = node.type
+
+            if ntype == "expression_statement":
+                for child in node.named_children:
+                    _check_expr(child)
+
+            elif ntype == "echo_statement":
+                for child in node.named_children:
+                    if _php_is_tainted(child, src, tainted):
+                        _report("SEC006TS", "HIGH",
+                                "XSS — user-controlled value echoed without sanitization", node)
+                        break
+
+            elif ntype in ("include_expression", "require_expression",
+                           "include_once_expression", "require_once_expression"):
+                for child in node.named_children:
+                    if _php_is_tainted(child, src, tainted):
+                        _report("SEC035TS", "HIGH",
+                                "LFI — user-controlled value in include/require", node)
+                        break
+
+            elif ntype in ("if_statement", "while_statement", "for_statement",
+                           "foreach_statement", "do_statement", "try_statement"):
+                for child in node.named_children:
+                    if child.type in ("compound_statement", "else_clause",
+                                      "elseif_clause", "finally_clause", "catch_clause"):
+                        _scan(list(child.named_children))
+                    else:
+                        _check_expr(child)
+
+            elif ntype == "compound_statement":
+                _scan(list(node.named_children))
+
+    _scan(stmts)
+    return findings
+
+
+def scan_php_ts(path: "Path") -> "list[Finding]":
+    """PHP taint analysis using tree-sitter AST — HIGH-confidence findings only."""
+    result = _get_ts_parser("php")
+    if result is None:
+        return []
+    parser, _ = result
+    try:
+        src_text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    src = src_text.encode("utf-8")
+    lines = src_text.splitlines()
+    tree = parser.parse(src)
+    root = tree.root_node
+
+    all_findings: list = []
+    reported: set = set()
+
+    def _process_scope(stmts):
+        tainted: set = set()
+        _php_propagate_scope(stmts, src, tainted)
+        if tainted:
+            all_findings.extend(_php_scan_sinks(stmts, src, tainted, path, lines, reported))
+
+    # Top-level script statements
+    top_stmts = [c for c in root.named_children
+                 if c.type not in ("function_definition", "class_declaration",
+                                   "namespace_definition")]
+    if top_stmts:
+        _process_scope(top_stmts)
+
+    # Function and method bodies
+    for node in _ts_walk(root):
+        if node.type in ("function_definition", "method_declaration"):
+            for child in node.named_children:
+                if child.type == "compound_statement":
+                    _process_scope(list(child.named_children))
+
+    return all_findings
+
+
+# ── Java taint engine ─────────────────────────────────────────────────────────
+
+_JAVA_REQUEST_TYPES: frozenset[str] = frozenset({
+    "httpservletrequest", "servletrequest", "httpexchange",
+    "serverrequest", "requestinfo",
+})
+
+_JAVA_SOURCE_METHODS: frozenset[str] = frozenset({
+    "getParameter", "getParameterValues", "getParameterMap",
+    "getHeader", "getHeaders", "getHeaderNames",
+    "getQueryString", "getInputStream", "getReader",
+    "getCookies", "getRequestURI", "getRequestURL",
+    "getPathInfo", "getServletPath",
+})
+
+_JAVA_SANITIZERS: frozenset[str] = frozenset({
+    "parseInt", "parseLong", "parseDouble", "parseFloat", "parseBoolean",
+    "valueOf", "escapeHtml", "encodeForHTML", "encodeForSQL",
+    "sanitize", "escape", "encode", "stripTags",
+})
+
+_JAVA_SQL_SINKS: frozenset[str] = frozenset({
+    "execute", "executeQuery", "executeUpdate", "executeBatch",
+    "prepareStatement", "prepareCall", "nativeQuery",
+    "createQuery", "createNativeQuery", "query",
+})
+
+_JAVA_CMD_SINKS: frozenset[str] = frozenset({"exec", "start"})
+_JAVA_FILE_SINKS: frozenset[str] = frozenset({
+    "readAllBytes", "readString", "readAllLines", "newInputStream",
+    "newBufferedReader", "newFileReader",
+})
+_JAVA_OUTPUT_SINKS: frozenset[str] = frozenset({
+    "println", "print", "printf", "format", "write", "append",
+})
+
+
+def _java_method_name(call_node, src: bytes) -> str:
+    # method_invocation named_children: [object_id, method_id, argument_list]
+    # The method name is the last identifier before argument_list
+    name = ""
+    for child in call_node.named_children:
+        if child.type == "identifier":
+            name = _ts_text(child, src)
+        elif child.type == "argument_list":
+            break
+    return name
+
+
+def _java_call_object(call_node, src: bytes) -> str:
+    nc = call_node.named_children
+    if nc and nc[0].type in ("identifier", "this"):
+        return _ts_text(nc[0], src).lower()
+    return ""
+
+
+def _java_is_source(node, src: bytes) -> bool:
+    if node.type == "method_invocation":
+        return _java_method_name(node, src) in _JAVA_SOURCE_METHODS
+    return False
+
+
+def _java_is_tainted(node, src: bytes, tainted: set) -> bool:
+    if node is None:
+        return False
+    ntype = node.type
+
+    if _java_is_source(node, src):
+        return True
+
+    if ntype == "identifier":
+        return _ts_text(node, src) in tainted
+
+    if ntype in ("binary_expression", "string_concatenation"):
+        return any(_java_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype == "method_invocation":
+        if _java_method_name(node, src) in _JAVA_SANITIZERS:
+            return False
+        return any(_java_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype in ("argument_list", "array_initializer", "object_creation_expression"):
+        return any(_java_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype == "field_access":
+        nc = node.named_children
+        return bool(nc) and _java_is_tainted(nc[0], src, tainted)
+
+    if ntype in ("cast_expression",):
+        return any(_java_is_tainted(c, src, tainted) for c in node.named_children)
+
+    return False
+
+
+def _java_propagate_scope(stmts: list, src: bytes, tainted: set) -> None:
+    while True:
+        prev = len(tainted)
+        _java_propagate_once(stmts, src, tainted)
+        if len(tainted) == prev:
+            break
+
+
+def _java_propagate_once(stmts: list, src: bytes, tainted: set) -> None:
+    for node in stmts:
+        ntype = node.type
+
+        if ntype == "local_variable_declaration":
+            for child in node.named_children:
+                if child.type == "variable_declarator":
+                    dc = child.named_children
+                    if len(dc) >= 2 and _java_is_tainted(dc[-1], src, tainted):
+                        if dc[0].type == "identifier":
+                            tainted.add(_ts_text(dc[0], src))
+
+        elif ntype == "assignment_expression":
+            nc = node.named_children
+            if len(nc) >= 2 and _java_is_tainted(nc[-1], src, tainted):
+                if nc[0].type == "identifier":
+                    tainted.add(_ts_text(nc[0], src))
+
+        elif ntype == "expression_statement":
+            for child in node.named_children:
+                _java_propagate_once([child], src, tainted)
+
+        elif ntype in ("if_statement", "while_statement", "for_statement",
+                       "enhanced_for_statement", "do_statement",
+                       "try_statement", "synchronized_statement"):
+            for child in node.named_children:
+                if child.type == "block":
+                    _java_propagate_once(list(child.named_children), src, tainted)
+                elif child.type in ("if_statement",):
+                    _java_propagate_once([child], src, tainted)
+
+        elif ntype == "block":
+            _java_propagate_once(list(node.named_children), src, tainted)
+
+
+def _java_scan_sinks(
+    stmts: list, src: bytes, tainted: set,
+    path: "Path", lines: list, reported: set,
+) -> "list[Finding]":
+    findings: list = []
+
+    def _report(rule_id, severity, message, node):
+        lineno = node.start_point[0] + 1
+        key = (lineno, rule_id)
+        if key in reported:
+            return
+        reported.add(key)
+        findings.append(_ts_finding(path, node, rule_id, severity, "java", message, lines))
+
+    def _check_call(node):
+        if node.type != "method_invocation":
+            return
+        method = _java_method_name(node, src)
+        obj = _java_call_object(node, src)
+        arg_nodes = []
+        for c in node.named_children:
+            if c.type == "argument_list":
+                arg_nodes = [x for x in c.named_children if x.is_named]
+                break
+
+        if method in _JAVA_SQL_SINKS:
+            if any(_java_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC004TS", "HIGH",
+                        "SQL injection — user-controlled value flows into database query", node)
+
+        if method in _JAVA_CMD_SINKS and ("runtime" in obj or "process" in obj or not obj):
+            if any(_java_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC002TS", "HIGH",
+                        "Command injection — user-controlled value in Runtime.exec() / ProcessBuilder", node)
+
+        if method in _JAVA_FILE_SINKS:
+            if any(_java_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC035TS", "HIGH",
+                        "Path traversal — user-controlled value used as file path", node)
+
+        if method in _JAVA_OUTPUT_SINKS:
+            # Exclude System.out, System.err, Logger, and similar non-HTTP writers
+            if obj not in ("system", "err", "log", "logger", "out", "console", "stderr", "stdout"):
+                if any(_java_is_tainted(a, src, tainted) for a in arg_nodes):
+                    _report("SEC006TS", "HIGH",
+                            "XSS — user-controlled value written to HTTP response", node)
+
+        if method == "sendRedirect":
+            if any(_java_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC056TS", "MEDIUM",
+                        "Open redirect — user-controlled value in sendRedirect()", node)
+
+    def _scan_expr(node):
+        if node.type == "method_invocation":
+            _check_call(node)
+        for child in node.named_children:
+            _scan_expr(child)
+
+    def _scan(inner_stmts):
+        for node in inner_stmts:
+            ntype = node.type
+            if ntype == "expression_statement":
+                for child in node.named_children:
+                    _scan_expr(child)
+            elif ntype == "local_variable_declaration":
+                # e.g. ResultSet rs = stmt.executeQuery(tainted)
+                for child in node.named_children:
+                    if child.type == "variable_declarator":
+                        for c in child.named_children:
+                            _scan_expr(c)
+            elif ntype == "return_statement":
+                for child in node.named_children:
+                    _scan_expr(child)
+            elif ntype in ("if_statement", "while_statement", "for_statement",
+                           "enhanced_for_statement", "do_statement",
+                           "try_statement", "synchronized_statement"):
+                for child in node.named_children:
+                    if child.type == "block":
+                        _scan(list(child.named_children))
+            elif ntype == "block":
+                _scan(list(node.named_children))
+
+    _scan(stmts)
+    return findings
+
+
+def scan_java_ts(path: "Path") -> "list[Finding]":
+    """Java taint analysis using tree-sitter AST — HIGH-confidence findings only."""
+    result = _get_ts_parser("java")
+    if result is None:
+        return []
+    parser, _ = result
+    try:
+        src_text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    src = src_text.encode("utf-8")
+    lines = src_text.splitlines()
+    tree = parser.parse(src)
+    root = tree.root_node
+
+    all_findings: list = []
+    reported: set = set()
+
+    for node in _ts_walk(root):
+        if node.type == "method_declaration":
+            block = None
+            for child in node.named_children:
+                if child.type == "block":
+                    block = child
+                    break
+            if block is None:
+                continue
+
+            stmts = list(block.named_children)
+            tainted: set = set()
+
+            # Seed taint from method parameters:
+            #   - HttpServletRequest / similar types → definitely user input
+            #   - String / CharSequence / Object → conservatively tainted
+            #     (they may carry user data via the call graph)
+            for param_container in node.named_children:
+                if param_container.type == "formal_parameters":
+                    for p in param_container.named_children:
+                        if p.type == "formal_parameter":
+                            pc = p.named_children
+                            if len(pc) >= 2:
+                                type_text = _ts_text(pc[0], src).lower()
+                                param_name = _ts_text(pc[-1], src)
+                                if any(t in type_text for t in _JAVA_REQUEST_TYPES):
+                                    tainted.add(param_name)
+                                elif type_text in (
+                                    "string", "charsequence", "object",
+                                    "stringbuilder", "stringbuffer",
+                                ):
+                                    tainted.add(param_name)
+
+            _java_propagate_scope(stmts, src, tainted)
+            if tainted:
+                all_findings.extend(_java_scan_sinks(stmts, src, tainted, path, lines, reported))
+
+    return all_findings
+
+
+# ── Go taint engine ───────────────────────────────────────────────────────────
+
+_GO_REQUEST_VARS: frozenset[str] = frozenset({"r", "req", "request", "ctx"})
+
+_GO_SOURCE_METHODS: frozenset[str] = frozenset({
+    "FormValue", "PostFormValue", "PostForm",
+    "URLParam",   # chi
+    "Param", "Query", "PostForm", "GetQuery", "GetPostForm",  # Gin / Echo
+})
+
+_GO_SANITIZERS: frozenset[str] = frozenset({
+    "Atoi", "ParseInt", "ParseFloat", "ParseBool", "ParseUint",
+    "PathEscape", "QueryEscape", "EscapeString", "EscapeHTML",
+    "HTMLEscapeString", "HTMLEscaper",
+})
+
+_GO_SQL_SINKS: frozenset[str] = frozenset({
+    "Query", "QueryRow", "QueryContext", "QueryRowContext",
+    "Exec", "ExecContext", "Prepare", "PrepareContext",
+    "Raw", "Where", "Select",
+})
+
+_GO_CMD_SINKS: frozenset[str] = frozenset({"Command"})
+
+_GO_FILE_SINKS: frozenset[str] = frozenset({
+    "Open", "ReadFile", "WriteFile", "Create", "OpenFile",
+    "Stat", "Remove", "MkdirAll", "Mkdir",
+    "ServeFile", "ServeContent",
+})
+
+_GO_HTTP_SINKS: frozenset[str] = frozenset({"Get", "Post", "Head", "Do", "NewRequest"})
+
+_GO_WRITE_SINKS: frozenset[str] = frozenset({
+    "Fprintf", "Fprintln", "Fprint",
+    "Write", "WriteString",
+})
+
+
+def _go_call_parts(call_node, src: bytes) -> tuple:
+    """Return (object_text, method_text, full_call_text) for a Go call_expression."""
+    full = _ts_text(call_node, src)
+    func_node = None
+    for c in call_node.children:
+        if c.type in ("selector_expression", "identifier", "call_expression"):
+            func_node = c
+            break
+    if func_node is None:
+        return "", "", full
+
+    if func_node.type == "selector_expression":
+        nc = func_node.named_children
+        if len(nc) >= 2:
+            return _ts_text(nc[0], src), _ts_text(nc[-1], src), full
+    if func_node.type == "identifier":
+        return "", _ts_text(func_node, src), full
+    return "", "", full
+
+
+def _go_is_source(call_node, src: bytes) -> bool:
+    obj, method, full = _go_call_parts(call_node, src)
+
+    # r.FormValue(...), r.PostFormValue(...)
+    if method in _GO_SOURCE_METHODS and obj in _GO_REQUEST_VARS:
+        return True
+
+    # r.Header.Get(...), r.URL.Query().Get(...)  — chained .Get on anything starting with r.
+    if method == "Get":
+        for rv in _GO_REQUEST_VARS:
+            if full.startswith(rv + "."):
+                return True
+
+    # mux.Vars(r), chi.URLParam(r, ...), any framework URLParam/Vars call
+    if method in ("Vars", "URLParam"):
+        return True
+
+    # Gin/Echo: c.Param(), c.Query()
+    if method in ("Param", "Query", "PostForm", "GetQuery", "GetPostForm"):
+        if obj in ("c", "ctx", "context"):
+            return True
+
+    return False
+
+
+def _go_is_tainted(node, src: bytes, tainted: set) -> bool:
+    if node is None:
+        return False
+    ntype = node.type
+
+    if ntype == "call_expression":
+        if _go_is_source(node, src):
+            return True
+        _, method, _ = _go_call_parts(node, src)
+        if method in _GO_SANITIZERS:
+            return False
+        return any(_go_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype == "identifier":
+        return _ts_text(node, src) in tainted
+
+    if ntype == "index_expression":
+        nc = node.named_children
+        return bool(nc) and _go_is_tainted(nc[0], src, tainted)
+
+    if ntype == "selector_expression":
+        nc = node.named_children
+        return bool(nc) and _go_is_tainted(nc[0], src, tainted)
+
+    if ntype == "binary_expression":
+        return any(_go_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype == "expression_list":
+        return any(_go_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype in ("argument_list", "composite_literal", "literal_value", "keyed_element"):
+        return any(_go_is_tainted(c, src, tainted) for c in node.named_children)
+
+    if ntype == "type_conversion_expression":
+        nc = node.named_children
+        if nc and _ts_text(nc[0], src) in (
+            "int", "int8", "int16", "int32", "int64",
+            "uint", "uint8", "uint16", "uint32", "uint64",
+            "float32", "float64", "bool",
+        ):
+            return False
+        return any(_go_is_tainted(c, src, tainted) for c in node.named_children)
+
+    return False
+
+
+def _go_propagate_scope(stmts: list, src: bytes, tainted: set) -> None:
+    while True:
+        prev = len(tainted)
+        _go_propagate_once(stmts, src, tainted)
+        if len(tainted) == prev:
+            break
+
+
+def _go_propagate_once(stmts: list, src: bytes, tainted: set) -> None:
+    for node in stmts:
+        ntype = node.type
+
+        if ntype == "short_var_declaration":
+            nc = node.named_children   # [expression_list_lhs, expression_list_rhs]
+            if len(nc) >= 2:
+                el_left, el_right = nc[0], nc[-1]
+                if _go_is_tainted(el_right, src, tainted):
+                    for c in (el_left.named_children if el_left.type == "expression_list"
+                              else [el_left]):
+                        if c.type == "identifier":
+                            tainted.add(_ts_text(c, src))
+
+        elif ntype == "assignment_statement":
+            nc = node.named_children
+            if len(nc) >= 2:
+                el_left, el_right = nc[0], nc[-1]
+                left_ids = (el_left.named_children if el_left.type == "expression_list"
+                            else [el_left])
+                right_exprs = (el_right.named_children if el_right.type == "expression_list"
+                               else [el_right])
+                for i, rhs in enumerate(right_exprs):
+                    if _go_is_tainted(rhs, src, tainted) and i < len(left_ids):
+                        if left_ids[i].type == "identifier":
+                            tainted.add(_ts_text(left_ids[i], src))
+
+        elif ntype in ("if_statement", "for_statement", "range_statement",
+                       "switch_statement", "select_statement",
+                       "type_switch_statement", "expression_switch_statement"):
+            for child in node.named_children:
+                if child.type in ("block", "statement_list"):
+                    _go_propagate_once(list(child.named_children), src, tainted)
+                elif child.type in ("communication_case", "default_case",
+                                    "expression_case", "type_case"):
+                    _go_propagate_once(list(child.named_children), src, tainted)
+
+        elif ntype in ("block", "statement_list"):
+            _go_propagate_once(list(node.named_children), src, tainted)
+
+
+def _go_scan_sinks(
+    stmts: list, src: bytes, tainted: set,
+    path: "Path", lines: list, reported: set,
+) -> "list[Finding]":
+    findings: list = []
+
+    def _report(rule_id, severity, message, node):
+        lineno = node.start_point[0] + 1
+        key = (lineno, rule_id)
+        if key in reported:
+            return
+        reported.add(key)
+        findings.append(_ts_finding(path, node, rule_id, severity, "go", message, lines))
+
+    def _check_call(call_node):
+        obj, method, _ = _go_call_parts(call_node, src)
+        arg_nodes = []
+        for c in call_node.named_children:
+            if c.type == "argument_list":
+                arg_nodes = [x for x in c.named_children if x.is_named]
+                break
+
+        if method in _GO_SQL_SINKS:
+            if any(_go_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC004TS", "HIGH",
+                        "SQL injection — user-controlled value flows into database query", call_node)
+
+        if method in _GO_CMD_SINKS and obj == "exec":
+            if any(_go_is_tainted(a, src, tainted) for a in arg_nodes):
+                _report("SEC002TS", "HIGH",
+                        "Command injection — user-controlled value in exec.Command()", call_node)
+
+        if method in _GO_FILE_SINKS and obj in ("os", "ioutil", "http", ""):
+            if arg_nodes and _go_is_tainted(arg_nodes[0], src, tainted):
+                _report("SEC035TS", "HIGH",
+                        "Path traversal — user-controlled value used as file path", call_node)
+
+        if method in _GO_HTTP_SINKS and obj in ("http", "client", ""):
+            if arg_nodes and _go_is_tainted(arg_nodes[0], src, tainted):
+                _report("SEC066TS", "HIGH",
+                        "SSRF — user-controlled value used as HTTP request URL", call_node)
+
+        if method in _GO_WRITE_SINKS:
+            if method in ("Fprintf", "Fprintln", "Fprint") and obj == "fmt":
+                # skip first arg (writer), check the rest
+                if any(_go_is_tainted(a, src, tainted) for a in arg_nodes[1:]):
+                    _report("SEC006TS", "HIGH",
+                            "XSS / format injection — user-controlled value in fmt.Fprintf response",
+                            call_node)
+            else:
+                if any(_go_is_tainted(a, src, tainted) for a in arg_nodes):
+                    _report("SEC006TS", "HIGH",
+                            "XSS — user-controlled value written to HTTP response", call_node)
+
+    def _scan_expr(node):
+        if node.type == "call_expression":
+            _check_call(node)
+        for child in node.named_children:
+            _scan_expr(child)
+
+    def _scan(inner_stmts):
+        for node in inner_stmts:
+            ntype = node.type
+            if ntype == "expression_statement":
+                for child in node.named_children:
+                    _scan_expr(child)
+            elif ntype in ("if_statement", "for_statement", "range_statement",
+                           "switch_statement", "select_statement",
+                           "type_switch_statement", "expression_switch_statement"):
+                for child in node.named_children:
+                    if child.type in ("block", "statement_list"):
+                        _scan(list(child.named_children))
+                    elif child.type in ("communication_case", "default_case",
+                                        "expression_case", "type_case"):
+                        _scan(list(child.named_children))
+            elif ntype in ("block", "statement_list"):
+                _scan(list(node.named_children))
+
+    _scan(stmts)
+    return findings
+
+
+def scan_go_ts(path: "Path") -> "list[Finding]":
+    """Go taint analysis using tree-sitter AST — HIGH-confidence findings only."""
+    result = _get_ts_parser("go")
+    if result is None:
+        return []
+    parser, _ = result
+    try:
+        src_text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    src = src_text.encode("utf-8")
+    lines = src_text.splitlines()
+    tree = parser.parse(src)
+    root = tree.root_node
+
+    all_findings: list = []
+    reported: set = set()
+
+    for node in _ts_walk(root):
+        if node.type == "function_declaration":
+            block = None
+            for child in node.named_children:
+                if child.type == "block":
+                    block = child
+                    break
+            if block is None:
+                continue
+
+            # Unwrap statement_list inside block
+            stmt_list = None
+            for child in block.named_children:
+                if child.type == "statement_list":
+                    stmt_list = list(child.named_children)
+                    break
+            if stmt_list is None:
+                stmt_list = list(block.named_children)
+
+            tainted: set = set()
+
+            # Seed: parameters of type *http.Request or similar
+            for plist in node.named_children:
+                if plist.type == "parameter_list":
+                    for p in plist.named_children:
+                        if p.type == "parameter_declaration":
+                            pc = p.named_children
+                            if pc:
+                                type_text = _ts_text(pc[-1], src).lower()
+                                param_name = _ts_text(pc[0], src)
+                                if "request" in type_text or "responsewriter" in type_text:
+                                    tainted.add(param_name)
+
+            _go_propagate_scope(stmt_list, src, tainted)
+            if tainted:
+                all_findings.extend(
+                    _go_scan_sinks(stmt_list, src, tainted, path, lines, reported)
+                )
+
+    return all_findings
+
+
 def scan_file(
     path: Path,
     taint_window: int = 25,
@@ -4452,16 +5793,19 @@ def scan_file(
     Run all scan engines for the given file and return deduplicated findings.
 
     Engines (in order, each de-duplicated by (line, rule_id)):
-      1. scan_with_regex         — fast pattern matching with context filtering
-      2. scan_entropy            — Shannon-entropy secret detection (all languages)
-      3. scan_multiline          — multi-line/logical-line injection rules (non-Python)
-      4. scan_python_ast         — Python AST: assert-statement detection
-      5. scan_python_ast_taint   — Python AST: intra+inter-procedural + cross-file taint
-      6. scan_interprocedural    — inter-procedural taint via function summaries (Python)
-      7. scan_js_ast             — JavaScript AST taint analysis via esprima
-      8. scan_taint              — cross-line sliding-window taint (all languages)
-      9. scan_structural_python  — structural (AST) pattern matching for Python (HIGH confidence)
-     10. scan_structural_js      — structural (AST) pattern matching for JS (HIGH confidence)
+      1.  scan_with_regex         — fast pattern matching with context filtering
+      2.  scan_entropy            — Shannon-entropy secret detection (all languages)
+      3.  scan_multiline          — multi-line/logical-line injection rules (non-Python)
+      4.  scan_python_ast         — Python AST: assert-statement detection
+      5.  scan_python_ast_taint   — Python AST: intra+inter-procedural + cross-file taint
+      6.  scan_interprocedural    — inter-procedural taint via function summaries (Python)
+      7.  scan_js_ast             — JavaScript AST taint analysis via esprima
+      8.  scan_taint              — cross-line sliding-window taint (all languages)
+      9.  scan_structural_python  — structural (AST) pattern matching for Python (HIGH confidence)
+     10.  scan_structural_js      — structural (AST) pattern matching for JS (HIGH confidence)
+     11.  scan_php_ts             — tree-sitter AST taint analysis for PHP (HIGH confidence)
+     12.  scan_java_ts            — tree-sitter AST taint analysis for Java (HIGH confidence)
+     13.  scan_go_ts              — tree-sitter AST taint analysis for Go (HIGH confidence)
     """
     language = _detect_language(path)
     if not language:
@@ -4498,6 +5842,21 @@ def scan_file(
         _merge(scan_structural_python(path))
     if language == "javascript":
         _merge(scan_structural_js(path))
+
+    # Tree-sitter taint analysis — HIGH confidence, "TS"-suffixed rule IDs
+    if language == "php":
+        ts_php = scan_php_ts(path)
+        _merge(ts_php)
+        # SEC011 is a catch-all that fires on raw $_GET/$_POST usage regardless of
+        # downstream sanitization. When tree-sitter finds no vulnerabilities (it
+        # correctly tracks escapeshellarg, PDO prepare, etc.), suppress SEC011 to
+        # avoid false positives on well-sanitized code.
+        if not ts_php:
+            findings[:] = [f for f in findings if f.rule_id != "SEC011"]
+    if language == "java":
+        _merge(scan_java_ts(path))
+    if language == "go":
+        _merge(scan_go_ts(path))
 
     return findings
 
@@ -5659,6 +7018,39 @@ def _to_sarif(findings: list[Finding], scan_path: str) -> dict:
     }
 
 
+def _is_third_party_library(path: Path) -> bool:
+    """
+    Check if a file is a known third-party library file to reduce false positives.
+    Returns True if the file should be excluded.
+    """
+    # Common third-party library filenames (case-insensitive)
+    library_files = {
+        "parsedown.php", "markdown.php", "smarty.class.php", "geshi.php",
+        "htmlpurifier.auto.php", "swift_required.php", "phpmailer.php",
+        "jquery.min.js", "bootstrap.min.js", "angular.min.js", "react.min.js",
+        "lodash.min.js", "moment.min.js", "d3.min.js"
+    }
+
+    filename_lower = path.name.lower()
+
+    # Check for exact library file matches
+    if filename_lower in library_files:
+        return True
+
+    # Exclude minified JS/CSS files (common in third-party libraries)
+    if filename_lower.endswith('.min.js') or filename_lower.endswith('.min.css'):
+        return True
+
+    # Exclude files in common third-party include directories
+    if any(part in ('includes', 'lib', 'libs', 'third_party', 'thirdparty', 'external')
+           for part in path.parts):
+        # Only exclude if it's a known library pattern
+        if any(lib in filename_lower for lib in ['jquery', 'bootstrap', 'parsedown', 'markdown', 'tinymce']):
+            return True
+
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Multi-language vulnerability scanner",
@@ -5684,7 +7076,10 @@ Examples:
     parser.add_argument("--path",    default=".",  help="File or directory to scan")
     parser.add_argument("--output",  default="scan-report.json")
     parser.add_argument("--exclude", nargs="*",
-                        default=["venv", ".venv", "node_modules", "__pycache__", "dist", "build"])
+                        default=["venv", ".venv", "node_modules", "__pycache__", "dist", "build",
+                                 "vendor", ".git", ".svn", "bower_components", "jspm_packages",
+                                 ".eggs", "*.egg-info", "htmlcov", ".tox", ".pytest_cache",
+                                 "site-packages", "lib/python", "env", ".bundle"])
     parser.add_argument("--taint-window", type=int, default=25,
                         help="Lines to look back for taint sources (default: 25)")
     parser.add_argument("--format", choices=["json", "sarif"], default="json",
@@ -5740,6 +7135,7 @@ Examples:
             f for f in scan_files
             if _detect_language(f) is not None
             and not any(ex in f.parts for ex in (args.exclude or []))
+            and not _is_third_party_library(f)
         ]
         print(f"  Diff mode: {len(scan_files)} changed file(s) relative to {args.base_ref}")
     elif root.is_file():
@@ -5750,6 +7146,7 @@ Examples:
             if f.is_file()
             and _detect_language(f) is not None
             and not any(ex in f.parts for ex in (args.exclude or []))
+            and not _is_third_party_library(f)
         ]
     else:
         print(f"Error: {root} is not a valid file or directory")
@@ -5831,6 +7228,7 @@ Examples:
     else:
         report = {
             "total":       len(all_findings),
+            "critical":    sum(1 for f in all_findings if f.severity == "CRITICAL"),
             "high":        sum(1 for f in all_findings if f.severity == "HIGH"),
             "medium":      sum(1 for f in all_findings if f.severity == "MEDIUM"),
             "low":         sum(1 for f in all_findings if f.severity == "LOW"),
@@ -5844,18 +7242,19 @@ Examples:
     if args.update_baseline:
         save_baseline(all_findings, args.update_baseline)
 
-    total = len(all_findings)
-    high  = sum(1 for f in all_findings if f.severity == "HIGH")
-    med   = sum(1 for f in all_findings if f.severity == "MEDIUM")
-    low   = sum(1 for f in all_findings if f.severity == "LOW")
+    total    = len(all_findings)
+    critical = sum(1 for f in all_findings if f.severity == "CRITICAL")
+    high     = sum(1 for f in all_findings if f.severity == "HIGH")
+    med      = sum(1 for f in all_findings if f.severity == "MEDIUM")
+    low      = sum(1 for f in all_findings if f.severity == "LOW")
     print(f"\n{'─'*50}")
     print(f"  Scan complete — {total} finding(s)"
           + (f"  ({suppressed} suppressed by baseline)" if suppressed else ""))
-    print(f"  HIGH={high}  MEDIUM={med}  LOW={low}")
+    print(f"  CRITICAL={critical}  HIGH={high}  MEDIUM={med}  LOW={low}")
     print(f"  By language: { {lang: len(flist) for lang, flist in by_lang.items()} }")
     print(f"{'─'*50}\n")
 
-    sys.exit(1 if high > 0 else 0)
+    sys.exit(1 if (critical > 0 or high > 0) else 0)
 
 
 if __name__ == "__main__":

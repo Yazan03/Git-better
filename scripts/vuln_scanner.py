@@ -7247,6 +7247,18 @@ Examples:
     high     = sum(1 for f in all_findings if f.severity == "HIGH")
     med      = sum(1 for f in all_findings if f.severity == "MEDIUM")
     low      = sum(1 for f in all_findings if f.severity == "LOW")
+
+    _SEV_COLOR = {"CRITICAL": "\033[1;35m", "HIGH": "\033[1;31m",
+                  "MEDIUM": "\033[1;33m", "LOW": "\033[1;34m"}
+    _RESET = "\033[0m"
+    if all_findings:
+        print(f"\n{'─'*50}")
+        print("  Findings:")
+        for f in all_findings:
+            color = _SEV_COLOR.get(f.severity, "")
+            print(f"  {color}[{f.severity}]{_RESET} {f.rule_id}  "
+                  f"{f.file}:{f.line}")
+            print(f"         {f.message}")
     print(f"\n{'─'*50}")
     print(f"  Scan complete — {total} finding(s)"
           + (f"  ({suppressed} suppressed by baseline)" if suppressed else ""))
